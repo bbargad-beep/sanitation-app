@@ -1,0 +1,4 @@
+import pandas as pd
+df = pd.read_excel('דוח_תברואה_לשנת_2026_-_ORIGINAL_COPY_לבדיקה__3_.xlsx', sheet_name='כל הנתונים')
+aml = df[df['אחריות']=='א.מ.ל']
+print(aml[['תת_נושא_חדש','תיאור']].head(40).to_string())
