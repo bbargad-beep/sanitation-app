@@ -3,6 +3,7 @@ pandas
 numpy
 plotly
 openpyxl
+xlsxwriter
 requests
 geopy
 pyproj
