@@ -1,4 +1,10 @@
 streamlit
 pandas
+numpy
 plotly
 openpyxl
+requests
+geopy
+pyproj
+scikit-learn
+playwright
