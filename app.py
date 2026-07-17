@@ -20,7 +20,7 @@ st.set_page_config(
     page_title="מערכת עיבוד פניות תברואה | הרצליה",
     page_icon="🗑️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",
 )
 
 # ── Import pipeline modules ─────────────────────────────────────────────────
