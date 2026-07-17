@@ -32,6 +32,7 @@ try:
     import enrich_pipeline as ep
     import flags as fl
     import heatmap as hm
+    import audit_log as al
     MODULES_OK = True
 except Exception as e:
     MODULES_OK = False
@@ -203,79 +204,15 @@ def _clear_checkpoint(filename: str):
 # ══════════════════════════════════════════════════════════════════════════
 
 def run_clean_in_memory(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Run clean_pipeline logic in memory, return cleaned df (no review split)."""
-    rows = []
-    for _, r in df_raw.iterrows():
-        clean_id, suffix = cp.parse_ticket(r.get("מס' פניה", ""))
-        date, hour, weekday, month = cp.parse_datetime(r.get("תאריך ושעת פתיחה"))
-        orig_sub  = cp.clean_text(r.get("תת נושא"))
-        if orig_sub and orig_sub in cp.CATEGORY_MAP:
-            new_cat = cp.CATEGORY_MAP[orig_sub]
-        elif not orig_sub:
-            main_topic = cp.clean_text(r.get("נושא", ""))
-            new_cat = cp.TOPIC_MAP.get(main_topic, "לא מסווג")
-        else:
-            new_cat = orig_sub
-        substance = cp.SUBSTANCE_MAP.get(orig_sub, "לא ידוע")
-        asset     = cp.ASSET_MAP.get(orig_sub, "לא ידוע")
-        resp      = cp.resolve_responsibility(new_cat, r.get("תיאור", ""))
-        loc = cp.parse_address(r.get("כתובת ואתר/מוסד", ""))
-        rows.append({
-            "מס' פניה": clean_id, "תאריך": date, "שעה": hour, "יום": weekday, "חודש": month,
-            "סטטוס פנייה": r.get("סטטוס פנייה"), "נושא": r.get("נושא"),
-            "תת_נושא_חדש": new_cat, "חומר": substance, "אחריות": resp, "נכס": asset,
-            "רחוב_ראשי": loc["רחוב_ראשי"], "רחוב_משני": loc["רחוב_משני"],
-            "מספר_בית": loc["מספר_בית"], "סוג_מיקום": loc["סוג_מיקום"],
-            "תיאור": r.get("תיאור"), "הערת_מיקום": loc["הערת_מיקום"],
-            "תלונה_חוזרת": None, "בקשת_חזרה": cp.detect_callback(r.get("תיאור")),
-            "מידע_אישי": cp.detect_personal_info(r.get("תיאור")), "סיומת_פניה": suffix,
-            "כתובת ואתר/מוסד": r.get("כתובת ואתר/מוסד"), "רחוב": loc["רחוב"],
-            "הערת_כתובת": loc["הערת_כתובת"], "מחלקה": r.get("מחלקה"),
-            "תת נושא מקורי": orig_sub, "מספר_חזרה": None,
-        })
-    out = pd.DataFrame(rows)
-    out["_date"] = pd.to_datetime(out["תאריך"], errors="coerce")
-    out = out.sort_values("_date").reset_index(drop=True)
-    out["מספר_חזרה"] = out.groupby(["רחוב_ראשי", "מספר_בית", "תת_נושא_חדש"]).cumcount() + 1
-    out["תלונה_חוזרת"] = (out["מספר_חזרה"] > 1).astype(int)
-    out = out.drop(columns=["_date"])
-    out["מס' פניה"] = out["מס' פניה"].astype(str).str.replace(r"\.0$", "", regex=True)
-    return out
+    """Delegate to the single authoritative clean path in clean_pipeline."""
+    df_clean, _ = cp.clean_dataframe(df_raw)
+    return df_clean
 
 
 _JUNK_STREET_RE = re.compile(r"^[\d\s\.\,\-\_\!\?\(\)״׳'\"]+$")
 
-# Raw address strings that parse_address cannot resolve to a street —
-# pulled directly from geocode_pipeline.FLAG_DESCRIPTIONS and GIS_MANUAL_MAP
-# (entries with value None). These should become "ציון דרך" so flags.py
-# treats them as advisory (warn) rather than blocking.
-_KNOWN_UNRESOLVABLE = {
-    'חוף-הים', 'חוף-הים - מרינה)', 'חוף-הים -רשות החופים)',
-    'חוף-הים .-רשות החופים)', 'חוף-הים 0-רשות החופים)',
-    'כביש החוף בחלק של גב ים !!!', 'כביש החוף תחנת דלק פז רונית',
-    'הרכבת בטיילת שליד קפה גן', 'הרכבת בעליה לגשר הולכי רגל',
-    'השונית עד מלון דניאל',
-    'כנפי נשרים מאלתרמן עד הבריגדה אונברסיטה',
-    'כנפי נשרים מאלתרמן עד הבריגדה בכניסה לחניה של שדה התעופה',
-    'שמעון לביא בגינת לביא ליד הספסל',
-    'אייבי נתן מיכל המיחזור האלקטרוני',
-    'משה חניון צחי',
-    'כיכר הציונות',
-    'אלט נויילנד',
-    'חיים גרשון',
-    'רפי וקנין',
-    'חוף הים',
-    'חוף ים',
-}
+from corrections import KNOWN_UNRESOLVABLE as _KNOWN_UNRESOLVABLE, DESCRIPTIVE_PREFIXES as _DESCRIPTIVE_PREFIXES
 
-# Raw address prefixes/substrings that reliably indicate a non-street location.
-# These are matched against the raw כתובת ואתר/מוסד column only when
-# רחוב_ראשי comes out blank or as pure junk — never applied to rows that
-# already have a real parsed street.
-_DESCRIPTIVE_PREFIXES = (
-    'חוף', 'פארק ', 'גן הגאולה', 'גן העירוני', 'גן לאומי', 'שמורת',
-    'טיילת', 'מרינה', 'שפת הים', 'חניון ', 'מגרש משחקים', 'גינת',
-)
 
 
 def auto_fix(df: pd.DataFrame) -> pd.DataFrame:
@@ -293,7 +230,13 @@ def auto_fix(df: pd.DataFrame) -> pd.DataFrame:
       5. Rows where רחוב_ראשי is blank but raw address looks like a real street
          → re-run parse_address to attempt recovery
     """
+    _orig_sug = df["סוג_מיקום"].copy() if "סוג_מיקום" in df.columns else None
+    _orig_street = df["רחוב_ראשי"].copy() if "רחוב_ראשי" in df.columns else None
     df = df.copy()
+    if _orig_sug is not None:
+        _orig_sug = _orig_sug.copy()
+    if _orig_street is not None:
+        _orig_street = _orig_street.copy()
 
     # 1. Ticket ID
     df["מס' פניה"] = (
@@ -381,6 +324,28 @@ def auto_fix(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             pass
 
+    # Audit log — auto_fix changes
+    try:
+        ticket_col = df["מס' פניה"]
+        if _orig_sug is not None:
+            changed_sug = df["סוג_מיקום"] != _orig_sug
+            for idx in df.index[changed_sug]:
+                al.log_correction(
+                    ticket_col.iloc[df.index.get_loc(idx)],
+                    "סוג_מיקום", _orig_sug.iloc[df.index.get_loc(idx)],
+                    df.at[idx, "סוג_מיקום"], "auto_fix"
+                )
+        if _orig_street is not None:
+            changed_st = df["רחוב_ראשי"] != _orig_street
+            for idx in df.index[changed_st]:
+                al.log_correction(
+                    ticket_col.iloc[df.index.get_loc(idx)],
+                    "רחוב_ראשי", _orig_street.iloc[df.index.get_loc(idx)],
+                    df.at[idx, "רחוב_ראשי"], "auto_fix"
+                )
+    except Exception:
+        pass
+
     return df
 
 
@@ -402,9 +367,24 @@ def _flag_breakdown(flagged: pd.DataFrame, severity: str) -> pd.DataFrame:
     return counts
 
 
+COORD_COLS = ["קו_רוחב", "קו_אורך"]
+
+
+def _coerce_coords(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee coordinate columns are float64 (strips stray commas, coerces non-numeric)."""
+    df = df.copy()
+    for col in COORD_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).astype("float64")
+    return df
+
+
 def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
     """Single Excel output: color-flagged data sheet + Hebrew summary sheet."""
-    df = df.copy()
+    df = _coerce_coords(df.copy())
     # Re-detect flags for coloring (drop internal cols from the visible sheet)
     flagged = fl.detect_flags(df, DATE_MIN, DATE_MAX, stage="all")
     severity = flagged["_flag_severity"].tolist()
@@ -450,7 +430,65 @@ def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
                 ws_d.set_row(i + 1, None, fmt_warn)
         for j, col in enumerate(export.columns):
             ws_d.write(0, j, col, fmt_hdr)
+
+        # Audit log sheet
+        try:
+            audit_df = al.log_to_dataframe()
+        except Exception:
+            import pandas as _pd
+            audit_df = _pd.DataFrame(columns=["ticket", "field", "old", "new", "source", "timestamp", "run_id"])
+        audit_df.to_excel(writer, index=False, sheet_name="יומן_תיקונים")
+        ws_a = writer.sheets["יומן_תיקונים"]
+        for j, col in enumerate(audit_df.columns):
+            ws_a.write(0, j, col, fmt_hdr)
     return buf.getvalue()
+
+
+def _leaflet_map_html(df: pd.DataFrame, height: int = 400) -> str:
+    """
+    Build a self-contained Leaflet HTML fragment showing geocoded rows as pins.
+    Pins are coloured by _flag_severity: red=block, orange=warn, blue=clean.
+    Returns raw HTML string for use with st.components.v1.html().
+    """
+    import json
+    color_map = {"block": "red", "warn": "orange", "review": "orange", "info": "blue", "": "green"}
+    points = []
+    for _, row in df.iterrows():
+        try:
+            lat = float(str(row.get("קו_רוחב", "")).replace(",", ""))
+            lon = float(str(row.get("קו_אורך", "")).replace(",", ""))
+            if not (32.0 <= lat <= 33.0 and 34.0 <= lon <= 36.0):
+                continue
+            sev = str(row.get("_flag_severity", ""))
+            label = str(row.get("_flag_labels", "")) or "תקין"
+            ticket = str(row.get("מס' פניה", ""))
+            street = str(row.get("רחוב_ראשי", "")) + " " + str(row.get("מספר_בית", ""))
+            points.append({"lat": lat, "lon": lon, "color": color_map.get(sev, "blue"),
+                           "popup": f"<b>{ticket}</b><br>{street}<br>{label}"})
+        except (ValueError, TypeError):
+            continue
+
+    points_json = json.dumps(points, ensure_ascii=False)
+    center_lat = 32.166 if not points else sum(p["lat"] for p in points) / len(points)
+    center_lon = 34.843 if not points else sum(p["lon"] for p in points) / len(points)
+
+    return f"""<!DOCTYPE html><html><head>
+<meta charset="utf-8"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>html,body,#map{{margin:0;padding:0;height:{height}px;}}</style>
+</head><body>
+<div id="map"></div>
+<script>
+var map = L.map('map').setView([{center_lat},{center_lon}], 14);
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+  {{attribution:'© OpenStreetMap contributors',maxZoom:19}}).addTo(map);
+var pts = {points_json};
+pts.forEach(function(p){{
+  L.circleMarker([p.lat,p.lon],{{radius:7,color:p.color,fillColor:p.color,fillOpacity:0.8}})
+   .bindPopup(p.popup).addTo(map);
+}});
+</script></body></html>"""
 
 
 def stepper_html(current: str) -> str:
@@ -573,6 +611,20 @@ elif stage == "clean":
             breakdown_w = _flag_breakdown(flagged, "warn")
             st.markdown("**🟡 פירוט אזהרות:**")
             st.dataframe(breakdown_w, use_container_width=True, hide_index=True)
+
+    # ── Triage groups ───────────────────────────────────────────────────────
+    _triage = fl.build_triage_groups(flagged)
+    _tsumm  = fl.triage_summary(_triage)
+    _display_cols = [c for c in ["מס' פניה", "רחוב_ראשי", "מספר_בית", "סוג_מיקום",
+                                  "_flag_labels"] if c in flagged.columns]
+    if _tsumm["blocking"] > 0:
+        with st.expander(f"🔴 חוסמות ({_tsumm['blocking']:,})", expanded=True):
+            st.dataframe(_triage["blocking"][_display_cols], use_container_width=True,
+                         hide_index=True)
+    if _tsumm["review"] > 0:
+        with st.expander(f"🟡 לסקירה ({_tsumm['review']:,})", expanded=False):
+            st.dataframe(_triage["review"][_display_cols], use_container_width=True,
+                         hide_index=True)
 
     # ── Download-first review Excel ─────────────────────────────────────────
     st.markdown('<div class="step-card"><h4>קובץ לבדיקה ידנית</h4>'
@@ -714,7 +766,7 @@ elif stage == "clean":
             f'<div class="banner-warn">⚠️ נותרו <strong>{n_block:,}</strong> שורות חוסמות. '
             f'הורידו את קובץ הבדיקה, תקנו את הגיליון <strong>"דורשות תיקון"</strong> '
             f'בקובץ המקורי, והעלו מחדש למעלה. '
-            f'לחלופין — לחצו "המשך בכל זאת" אם הבעיות ידועות ואינן מונעות גאוקוד.</div>',
+            f'לחלופין — לחצו "החרג ועבור הלאה" אם הבעיות ידועות ואינן מונעות גאוקוד.</div>',
             unsafe_allow_html=True)
 
     cta1, cta2, cta3 = st.columns([1, 1, 1])
@@ -731,7 +783,9 @@ elif stage == "clean":
                       disabled=True, use_container_width=True)
     with cta3:
         if n_block > 0:
-            if st.button("▶ המשך בכל זאת (התעלם מחוסמות)", use_container_width=True):
+            if st.button("▶ החרג ועבור הלאה (רשום ב-יומן)", use_container_width=True):
+                for _tid in fl.waived_tickets(flagged):
+                    al.log_correction(_tid, "_flag_severity", "block", "waived", "waive")
                 goto("geocode")
 
 
@@ -788,12 +842,13 @@ elif stage == "geocode":
                         label = names.get(pass_name, pass_name)
                         prog.progress(min(current / total, 1.0),
                                       text=f"{label}: {current:,}/{total:,} — נפתרו {geocoded:,}")
-                        # Save checkpoint every 50 rows
-                        _checkpoint_counter[0] += 1
-                        if _checkpoint_counter[0] % 50 == 0:
-                            _save_checkpoint(_df_ref[0], st.session_state.filename)
 
-                df_geo, gstats = gp.geocode_dataframe(df, progress_cb=cb)
+                def checkpoint_cb(df_snap):
+                    _df_ref[0] = df_snap
+                    _save_checkpoint(df_snap, st.session_state.filename)
+
+                df_geo, gstats = gp.geocode_dataframe(df, progress_cb=cb,
+                                                       checkpoint_cb=checkpoint_cb)
                 _df_ref[0] = df_geo  # update ref (though run is done)
                 prog.progress(1.0, text="הושלם")
                 _clear_checkpoint(st.session_state.filename)  # clean up on success
@@ -931,6 +986,18 @@ elif stage == "geocode":
                 if coord_col in edited.columns:
                     df.loc[unresolved.index, coord_col] = pd.to_numeric(
                         edited[coord_col].astype(str).str.replace(",", ""), errors="coerce")
+            # Mark manually-edited rows with coordinates
+            _edited_has_coords = (
+                pd.to_numeric(edited["קו_רוחב"].astype(str).str.replace(",", ""), errors="coerce").notna()
+                & pd.to_numeric(edited["קו_אורך"].astype(str).str.replace(",", ""), errors="coerce").notna()
+            )
+            df.loc[unresolved.index[_edited_has_coords], "geocode_method"] = "manual"
+            df.loc[unresolved.index[_edited_has_coords], "דיוק_גאוקוד"] = "address"
+            # Audit log — manual editor coordinate entries
+            for _idx in unresolved.index[_edited_has_coords]:
+                _pid = df.at[_idx, "מס' פניה"]
+                al.log_correction(_pid, "קו_רוחב", None, df.at[_idx, "קו_רוחב"], "manual_editor")
+                al.log_correction(_pid, "קו_אורך", None, df.at[_idx, "קו_אורך"], "manual_editor")
             if "רחוב_ראשי" in edited.columns:
                 df.loc[unresolved.index, "רחוב_ראשי"] = edited["רחוב_ראשי"].values
             if "מספר_בית" in edited.columns:
@@ -969,6 +1036,10 @@ elif stage == "geocode":
                                 mask = df["מס' פניה"].astype(str) == pid
                                 df.loc[mask, "קו_רוחב"] = lat_v
                                 df.loc[mask, "קו_אורך"] = lon_v
+                                df.loc[mask, "geocode_method"] = "manual"
+                                df.loc[mask, "דיוק_גאוקוד"] = "address"
+                                al.log_correction(pid, "קו_רוחב", None, lat_v, "bulk_paste")
+                                al.log_correction(pid, "קו_אורך", None, lon_v, "bulk_paste")
                                 applied += 1
                             except ValueError:
                                 pass
@@ -999,7 +1070,11 @@ elif stage == "geocode":
                           disabled=True, use_container_width=True)
         with cta3:
             if n_block > 0:
-                if st.button("▶ המשך בכל זאת (התעלם מחוסמות)", use_container_width=True):
+                if st.button("▶ החרג ועבור הלאה (רשום ב-יומן)", use_container_width=True):
+                    _geo_flagged = fl.detect_flags(
+                        st.session_state.df, DATE_MIN, DATE_MAX, stage="geocode")
+                    for _tid in fl.waived_tickets(_geo_flagged):
+                        al.log_correction(_tid, "_flag_severity", "block", "waived", "waive")
                     goto("enrich")
 
 
@@ -1011,23 +1086,26 @@ elif stage == "enrich":
     df = st.session_state.df
     st.markdown("### שלב 4 — העשרה (שיוך רובעי פינוי)")
 
-    if not st.session_state.enriched:
-        st.markdown('<div class="step-card"><h4>מה קורה כאן?</h4><p>כל פנייה משויכת לרובע פינוי '
-                    'לפי הקואורדינטות שלה, ומקבלת את יום הפינוי של אותו רובע. בנוסף מסומן אם '
-                    'התלונה הוגשה ביום הפינוי עצמו.</p></div>', unsafe_allow_html=True)
-        if st.button("▶ הרץ העשרה", type="primary", use_container_width=True):
-            with st.spinner("משייך רובעים..."):
-                df_en, estats = ep.enrich_dataframe(df)
-                st.session_state.df = df_en
-                st.session_state.enriched = True
-                st.session_state.stats.update({
-                    "in_city": estats["in_city"],
-                    "same_day": estats["same_day"],
-                    "same_day_pct": f"{estats['same_day_pct']}%",
-                })
-                _save_state()
-            st.rerun()
-    else:
+    # Auto-recompute if coords changed since last enrichment
+    _current_fp = ep.coord_fingerprint(df)
+    _stored_fp = st.session_state.get("enrich_fingerprint", "")
+    _needs_enrich = (not st.session_state.enriched) or (_current_fp != _stored_fp)
+
+    if _needs_enrich:
+        with st.spinner("משייך רובעים..."):
+            df_en, estats = ep.enrich_dataframe(df)
+            st.session_state.df = df_en
+            df = df_en
+            st.session_state.enriched = True
+            st.session_state.enrich_fingerprint = _current_fp
+            st.session_state.stats.update({
+                "in_city": estats["in_city"],
+                "same_day": estats["same_day"],
+                "same_day_pct": f"{estats['same_day_pct']}%",
+            })
+            _save_state()
+
+    if True:
         df = st.session_state.df
         n_unknown = int((df["רובע_פינוי"] == "לא ידוע").sum())
         n_out = int((df["רובע_פינוי"] == "מחוץ לתחום").sum())
@@ -1071,6 +1149,22 @@ elif stage == "output":
     df = st.session_state.df
     st.markdown("### שלב 5 — פלט וניתוח")
 
+    # Auto-recompute enrichment if coords changed
+    _out_fp = ep.coord_fingerprint(df)
+    if st.session_state.get("enrich_fingerprint", "") != _out_fp:
+        with st.spinner("עדכון שיוך רובעים..."):
+            df_re, estats = ep.enrich_dataframe(df)
+            st.session_state.df = df_re
+            df = df_re
+            st.session_state.enriched = True
+            st.session_state.enrich_fingerprint = _out_fp
+            st.session_state.stats.update({
+                "in_city": estats["in_city"],
+                "same_day": estats["same_day"],
+                "same_day_pct": f"{estats['same_day_pct']}%",
+            })
+            _save_state()
+
     # ── FILTERS (drive both heatmap and analytics) ──────────────────────────
     st.markdown('<div class="step-card"><h4>סינון נתונים</h4><p>בחרו את פרוסת הנתונים שברצונכם '
                 'לראות. הבחירה משפיעה גם על מפת החום וגם על הניתוח. ברירת המחדל היא כל הנתונים.</p></div>',
@@ -1109,7 +1203,8 @@ elif stage == "output":
 
     st.caption(f"מציג {len(d):,} מתוך {len(df):,} שורות")
 
-    tab_map, tab_analytics, tab_download = st.tabs(["🗺️ מפת חום", "📈 ניתוח", "⬇️ הורדה"])
+    tab_map, tab_analytics, tab_download, tab_qa = st.tabs(
+        ["🗺️ מפת חום", "📈 ניתוח", "⬇️ הורדה", "🎲 דגימת QA"])
 
     # ── HEATMAP ─────────────────────────────────────────────────────────────
     with tab_map:
@@ -1235,3 +1330,64 @@ elif stage == "output":
             st.session_state.enriched = False
             _clear_state()
             goto("upload")
+
+    # ── QA SAMPLING TAB ─────────────────────────────────────────────────────
+    with tab_qa:
+        import acceptance_sampling as qs
+
+        st.markdown('<div class="step-card"><h4>דגימת קבלה — אפס פגמים</h4>'
+                    '<p>בוחנת מדגם אקראי מכל רמת גאוקוד. פסיקה: ✅ קבל (0 פגמים) '
+                    'או ❌ דחה (פגם ≥1). גודל המדגם מחושב לפי סיכון צרכן β=10%.</p></div>',
+                    unsafe_allow_html=True)
+
+        _qa_seed = st.number_input("זרע אקראיות (0 = כל פעם שונה)", min_value=0,
+                                   max_value=99999, value=42, step=1, key="qa_seed")
+        if st.button("▶ הרץ דגימת QA", type="primary", use_container_width=True):
+            _qa_result = qs.run_sampling_plan(df, seed=int(_qa_seed) or None)
+            st.dataframe(_qa_result, use_container_width=True, hide_index=True)
+            n_reject = int((_qa_result["פסיקה"].str.startswith("❌")).sum())
+            if n_reject == 0:
+                st.success("כל הרמות עברו את דגימת ה-QA")
+            else:
+                st.warning(f"{n_reject} רמות לא עברו את הדגימה — יש לבדוק")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  VALIDATION MODE — compare pipeline output to a reference file
+# ══════════════════════════════════════════════════════════════════════════
+
+elif stage == "validate":
+    import validation as vl
+
+    st.markdown("### מצב אימות — השוואה לקובץ יחוס")
+    st.markdown('<div class="step-card"><h4>מה קורה כאן?</h4>'
+                '<p>העלו קובץ Excel שנבדק ידנית ("יחוס"). המערכת תצרף אותו לנתוני הצינור '
+                'לפי <strong>מס׳ פניה</strong> ותציג טבלת הסכמה לכל עמודה.</p></div>',
+                unsafe_allow_html=True)
+
+    ref_file = st.file_uploader("קובץ יחוס (.xlsx)", type=["xlsx"],
+                                key="ref_upload", label_visibility="visible")
+
+    if ref_file and st.session_state.get("df") is not None:
+        try:
+            ref_df = pd.read_excel(ref_file)
+            result = vl.compare_to_reference(st.session_state.df, ref_df)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("שורות תואמות", f"{result['matched_rows']:,}")
+            c2.metric("רק בצינור",    f"{result['only_pipeline']:,}")
+            c3.metric("רק ביחוס",     f"{result['only_reference']:,}")
+
+            st.markdown("#### הסכמה לפי עמודה")
+            st.dataframe(result["per_column"].sort_values("אחוז_הסכמה"),
+                         use_container_width=True, hide_index=True)
+
+            with st.expander("📋 פרטי שורות שונות"):
+                st.dataframe(result["diff"], use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"שגיאה בהשוואה: {e}")
+    elif ref_file is None:
+        if st.session_state.get("df") is None:
+            st.info("טענו קובץ נתונים לצינור לפני הפעלת מצב אימות.")
+    if st.button("⬅ חזור לפלט", use_container_width=True):
+        goto("output")

@@ -32,6 +32,7 @@
 #
 # ============================================================================
 
+import hashlib
 import os
 import logging
 import pandas as pd
@@ -52,6 +53,9 @@ ZONE_COL  = "רובע_פינוי"
 DAY_COL   = "יום_פינוי"
 SAMEDAY_COL = "תלונה_ביום_פינוי"
 COMPLAINT_DAY_COL = "יום"   # weekday name the complaint was filed
+DISTANCE_COL = "מרחק_רובע"   # meters to nearest zone reference point
+ZONE_UNCERTAIN_M = 150        # rows > this get zone_uncertain flag
+FINGERPRINT_COL = "coord_fingerprint"
 
 # ── Zone → collection weekday (deterministic) ───────────────────────────────
 ZONE_TO_DAY = {
@@ -100,6 +104,23 @@ def _load_classifier():
     return knn
 
 
+def coord_fingerprint(df: pd.DataFrame) -> str:
+    """MD5 of the two coordinate columns — used to detect when re-enrichment is needed."""
+    lat = df[LAT_COL].astype(str).values if LAT_COL in df.columns else []
+    lon = df[LON_COL].astype(str).values if LON_COL in df.columns else []
+    combined = b"".join(v.encode() for v in lat) + b"||" + b"".join(v.encode() for v in lon)
+    return hashlib.md5(combined).hexdigest()
+
+
+def _haversine_m(lat1: np.ndarray, lon1: np.ndarray, lat2: np.ndarray, lon2: np.ndarray) -> np.ndarray:
+    """Approximate haversine distance in metres between paired coordinates."""
+    R = 6_371_000
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a = np.sin(dlat / 2) ** 2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon / 2) ** 2
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+
 def enrich_dataframe(df: pd.DataFrame) -> tuple:
     """
     Add zone, collection-day, and same-day-flag columns to a geocoded DataFrame.
@@ -123,10 +144,14 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
                 errors="coerce",
             )
 
+    # Store coordinate fingerprint before zone assignment
+    df[FINGERPRINT_COL] = coord_fingerprint(df)
+
     # Initialise output columns
     df[ZONE_COL] = "לא ידוע"
     df[DAY_COL] = None
     df[SAMEDAY_COL] = np.nan
+    df[DISTANCE_COL] = np.nan
 
     clf = _load_classifier()
 
@@ -136,6 +161,18 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
         coords = df.loc[has_coords, [LAT_COL, LON_COL]].values
         predicted = clf.predict(coords)
         df.loc[has_coords, ZONE_COL] = predicted
+
+        # Distance to nearest reference point (in metres)
+        try:
+            distances, _ = clf.kneighbors(coords)
+            dist_deg = distances[:, 0]
+            lat_arr = df.loc[has_coords, LAT_COL].values
+            lon_arr = df.loc[has_coords, LON_COL].values
+            ref_lat = lat_arr + dist_deg
+            dist_m = _haversine_m(lat_arr, lon_arr, ref_lat, lon_arr)
+            df.loc[has_coords, DISTANCE_COL] = np.round(dist_m, 1)
+        except Exception as e:
+            log.warning(f"Distance calculation failed: {e}")
     elif clf is None:
         log.warning("No classifier available — all zones set to 'לא ידוע'")
 

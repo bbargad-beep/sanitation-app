@@ -72,9 +72,11 @@ log = logging.getLogger("geocode_pipeline")
 #  CONFIGURATION
 # ============================================================================
 
+PIPELINE_VERSION = "3.0.0"
 NOMINATIM_DELAY = 1.1       # seconds between Nominatim requests (rate limit)
 GIS_DELAY       = 0.4       # seconds between GIS portal requests
 NOMINATIM_AGENT = "herzliya_sanitation_municipal_app"
+PRECISION_COL   = "דיוק_גאוקוד"
 
 # Herzliya bounding box (approx) for sanity-checking geocode results
 HERZLIYA_BOUNDS = {
@@ -83,71 +85,14 @@ HERZLIYA_BOUNDS = {
 }
 
 # ============================================================================
-#  STREET NAME CORRECTIONS
-#  Merged from all rescue scripts — CRM spelling → best geocoding form
+#  STREET NAME CORRECTIONS — loaded from corrections.json
 # ============================================================================
-
-STREET_CORRECTIONS = {
-    # ── From geocode_rescue.py ────────────────────────────────────────────────
-    'ווינגיט':                   'וינגייט',
-    'הנשיא יצחק בן צבי':        'יצחק בן צבי',
-    'טשרנחובסקי':               'טשרניחובסקי',
-    'מוהוליבר':                 'מוהליבר',
-    'פתח תקוה':                 'דרך פתח תקווה',
-    'ילגורדון':                 'יהודה לייב גורדון',
-    'יל גורדון':                'יהודה לייב גורדון',
-    'קקל':                       'קרן קיימת לישראל',
-    'קק ל':                      'קרן קיימת לישראל',
-    'ראשלצ':                     'דרך ראשון לציון',
-    'ראשל צ':                    'דרך ראשון לציון',
-    'העליה השניה':              'העלייה השנייה',
-    'נוה עובד':                  'נווה עובד',
-    'אנילביץ מרדכי':            'מרדכי אנילביץ',
-    'סנה משה':                  'משה סנה',
-    'קורצק יאנוש':              'יאנוש קורצ\'אק',
-    'פסמן משה':                 'משה פסמן',
-    'מרזוק משה':                'משה מרזוק',
-    'ארגוב סשה':                'סשה ארגוב',
-    'ישראל ישעיהו':             'ישעיהו ישראל',
-    'הראובני דוד':              'דוד הראובני',
-    'שוידלסון':                 'שוידלסן',
-    'אוטו ורבורג':              'אוטו וורבורג',
-    'יצחק נגר':                 "נג'ר יצחק",
-    'נגר יצחק':                 "נג'ר יצחק",
-    'שד אלי לנדאו':             'שדרות אלי לנדאו',
-    'שד יעקב לנצט':             'שדרות יעקב לנצט',
-    'גיבורי עציון':             'גבורי עציון',
-    'חתם סופר':                 'חתם סופר',
-    # ── From geocode_rescue2.py (targeted) ────────────────────────────────────
-    'קק"ל':                      'קרן קיימת לישראל',
-    'הפלמ"ח':                    'פלמח',
-    'ראשל"צ':                    'דרך ראשון לציון',
-    "קורצ'ק יאנוש":             'יאנוש קורצאק',
-    'שזר':                       'זלמן שזר',
-    # ── From geocode_rescue3.py (name corrections) ────────────────────────────
-    'הלותם':                     'הלוטם',
-    'י.ל.גורדון':                'י ל גורדון',
-    'יהושוע בן נון':             'יהושע בן נון',
-    'יהושפט המלך מול':           'יהושפט המלך',
-    'כיכר הציונות':              'ככר הציונות',
-    'מהר"ל':                     'מהרל',
-    'מנחם בגין שד':              'מנחם בגין',
-    'מתיתיהו':                   'מתתיהו',
-    'קפלינסקי':                  'קפלנסקי',
-    'שלום רוזנלפלד':             'שלום רוזנפלד',
-    'שלומית כהן-קישיק':          'שולמית כהן-קישיק',
-    'אריה לייב יפה':             'יפה אריה לייב',
-    'מורי עפארי':                'מורי עופרי',
-    'אנצו סירני':                'סירני',
-    'אלט נויילנד':               'דרך אלטנוילנד',
-    'זיסו א.ל.':                 'זיסו',
-    'אור חיים':                  'אור החיים',
-    'דפנה האשל':                 'האשל',
-    # ── General CRM abbreviations ─────────────────────────────────────────────
-    'שד':                        'שדרות',
-    'רח':                        'רחוב',
-    'כ\'':                       'כביש',
-}
+from corrections import (
+    STREET_CORRECTIONS,
+    GIS_MANUAL_MAP as _GIS_MAP_FROM_JSON,
+    FLAG_DESCRIPTIONS as _FLAG_DESC_FROM_JSON,
+    KNOWN_UNRESOLVABLE,
+)
 
 # ============================================================================
 #  BAKED-IN OSM STREET CENTROIDS (from Overpass query)
@@ -235,98 +180,9 @@ GIS_HEADERS     = {
     "Referer":    GIS_HOME_URL,
 }
 
-# GIS manual correction map — CRM spelling → GIS canonical spelling
-GIS_MANUAL_MAP = {
-    'קק"ל':                      'הקרן הקיימת',
-    'ישראל ישעיהו':              'ישעיהו ישראל',
-    'יצחק נגר':                  'נג\u05f3ר יצחק',
-    'נגר יצחק':                  'נג\u05f3ר יצחק',
-    'יוסף נדבה':                 'נדבה יוסף',
-    'חנה רובינא':                'רובינא חנה',
-    'מנחם בגין שד':              'שד בגין מנחם',
-    'שד יעקב לנצט':              'לנצט יעקוב',
-    'אריה לייב יפה':             'יפה אריה לייב',
-    'מרזוק משה':                 'מרזוק',
-    "קורצ'ק יאנוש":              "קורצ'אק",
-    'קפלינסקי':                  'קפלנסקי',
-    'ראשל"צ':                    'ראשון לציון',
-    'מוהוליבר':                  'מוהליבר',
-    'מורי עפארי':                'מורי עופרי',
-    'הרב ניסים':                 'הרב יצחק ניסים',
-    'הרב נורוק':                 'נורוק',
-    'הרימונים':                  'הרמונים',
-    'הדסים':                     'ההדסים',
-    'המעין':                     'המעיין',
-    'הראובני דוד':               'הראובני',
-    'הדודאים שביל אדמית':        'דודאים',
-    'הדודאים':                   'דודאים',
-    'גיבורי עציון':              'גבורי עציון',
-    'אנילביץ מרדכי':             'אנילביץ',
-    'אנצו סירני':                'סירני',
-    'אור חיים':                  'אור החיים',
-    'אייבי נתן מיכל המיחזור האלקטרוני': 'אייבי נתן',
-    'אלי לנדאו עד נילי':         "שד' אלי לנדאו",
-    'שד אלי לנדאו':              "שד' אלי לנדאו",
-    'אלמוג':                     'אלומות',
-    'בית הראשונים':              'הראשונים',
-    'אורי צבי גרינברג':          'גרינברג אורי צבי',
-    'דפנה האשל':                 '__INTERSECTION__דפנה__האשל',
-    'הגדעונים':                  'הגדוד העברי',
-    'הלותם':                     'לוטם',
-    'המפל':                      'הכרמל',
-    'הרכבת בטיילת שליד קפה גן':  'טיילת חיים הרצוג',
-    'הרכבת בעליה לגשר הולכי רגל': 'טיילת חיים הרצוג',
-    'השונית עד מלון דניאל':      'השונית',
-    'יגאל אלון':                 'אלוף יגאל אלון',
-    'יהושוע בן נון':             'יהושע בן נון',
-    'יהושפט המלך מול':           'יהושפט המלך',
-    'כנפי נשרים מאלתרמן עד הבריגדה אונברסיטה':              'כנפי נשרים',
-    'כנפי נשרים מאלתרמן עד הבריגדה בכניסה לחניה של שדה התעופה': 'כנפי נשרים',
-    'לחי':                       'לח"י',
-    'מתיתיהו':                   'מתתיהו',
-    'נוה עובד':                  'שד נוה עובד',
-    'פתח תקוה':                  'פתח תקווה',
-    'שביל אבו חצירא שירת גאולים': 'שירת גאולים',
-    'שזר':                       'שז"ר',
-    'שחל':                       'שח"ל',
-    'שלום רוזנלפלד':             'שלום רוזנפלד',
-    'חתם סופר':                  'חת"ם סופר',
-    'טשרנחובסקי':                'טשרניחובסקי',
-    'י.ל.גורדון':                'י.ל. גורדון',
-    'ווינגיט':                   'וינגייט',
-    'זיסו א.ל.':                 'זיסו',
-    # Unresolvable — explicit None
-    'חוף-הים':                   None,
-    'חוף-הים - מרינה)':          None,
-    'חוף-הים -רשות החופים)':     None,
-    'חוף-הים .-רשות החופים)':    None,
-    'חוף-הים 0-רשות החופים)':    None,
-    'כביש החוף בחלק של גב ים !!!': None,
-    'כביש החוף תחנת דלק פז רונית': None,
-    'משה חניון צחי':             None,
-    'שמעון לביא בגינת לביא ליד הספסל': None,
-    'כיכר הציונות':              None,
-    'אלט נויילנד':               None,
-    'חיים גרשון':                None,
-    'רפי וקנין':                 None,
-}
+GIS_MANUAL_MAP = _GIS_MAP_FROM_JSON
+FLAG_DESCRIPTIONS = _FLAG_DESC_FROM_JSON
 
-# ============================================================================
-#  FLAG-ONLY DESCRIPTIONS (location descriptions, not geocodable streets)
-# ============================================================================
-
-FLAG_DESCRIPTIONS = {
-    'חוף-הים', 'חוף-הים - מרינה)', 'חוף-הים -רשות החופים)',
-    'חוף-הים .-רשות החופים)', 'חוף-הים 0-רשות החופים)',
-    'כביש החוף בחלק של גב ים !!!', 'כביש החוף תחנת דלק פז רונית',
-    'הרכבת בטיילת שליד קפה גן', 'הרכבת בעליה לגשר הולכי רגל',
-    'השונית עד מלון דניאל',
-    'כנפי נשרים מאלתרמן עד הבריגדה אונברסיטה',
-    'כנפי נשרים מאלתרמן עד הבריגדה בכניסה לחניה של שדה התעופה',
-    'שמעון לביא בגינת לביא ליד הספסל',
-    'אייבי נתן מיכל המיחזור האלקטרוני',
-    'משה חניון צחי',
-}
 
 
 # ============================================================================
@@ -399,17 +255,21 @@ def _registry_resolve(name: str):
 # ============================================================================
 
 def _nominatim_geocode_one(geolocator, query: str, retries: int = 2):
-    """Single Nominatim query. Returns (lat, lon) or (None, None)."""
+    """Single Nominatim query. Returns (lat, lon, place_rank, addresstype)."""
     for attempt in range(retries):
         try:
             result = geolocator.geocode(query, language="he", timeout=10)
             if result:
-                return round(result.latitude, 6), round(result.longitude, 6)
-            return None, None
+                raw = getattr(result, "raw", {}) or {}
+                place_rank = raw.get("place_rank")
+                addresstype = raw.get("addresstype", "")
+                return (round(result.latitude, 6), round(result.longitude, 6),
+                        place_rank, addresstype)
+            return None, None, None, None
         except (GeocoderTimedOut, GeocoderServiceError):
             if attempt < retries - 1:
                 time.sleep(2)
-    return None, None
+    return None, None, None, None
 
 
 def _build_candidates(street: str, house_num: str = "",
@@ -511,7 +371,9 @@ def _is_in_herzliya(lat, lon) -> bool:
 
 
 def nominatim_pass(df: pd.DataFrame,
-                   progress_cb: Optional[Callable] = None) -> pd.DataFrame:
+                   progress_cb: Optional[Callable] = None,
+                   checkpoint_cb: Optional[Callable] = None,
+                   checkpoint_every: int = 100) -> pd.DataFrame:
     """
     Run Nominatim geocoding on all rows missing coordinates.
     Modifies df in place, adding קו_רוחב, קו_אורך, geocode_method columns.
@@ -524,7 +386,8 @@ def nominatim_pass(df: pd.DataFrame,
     geolocator = Nominatim(user_agent=NOMINATIM_AGENT)
 
     # Ensure columns exist
-    for col in ["קו_רוחב", "קו_אורך", "geocode_method"]:
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL,
+                "geocode_query"]:
         if col not in df.columns:
             df[col] = None
 
@@ -539,7 +402,7 @@ def nominatim_pass(df: pd.DataFrame,
 
     log.info(f"Nominatim: {total} rows to geocode")
 
-    # Cache: (street, house_num) → (lat, lon) to avoid re-querying
+    # Cache: (street, house_num) → (lat, lon, place_rank, query) to avoid re-querying
     cache = {}
     geocoded = 0
     failed = 0
@@ -551,58 +414,81 @@ def nominatim_pass(df: pd.DataFrame,
         loc_type = str(row.get("סוג_מיקום", "")).strip() if pd.notna(row.get("סוג_מיקום")) else ""
         st2 = str(row.get("רחוב_משני", "")).strip() if pd.notna(row.get("רחוב_משני")) else ""
 
+        def _fire_checkpoint():
+            if checkpoint_cb and (i + 1) % checkpoint_every == 0:
+                checkpoint_cb(df)
+
         if not street or street == "nan":
             df.at[idx, "geocode_method"] = "no_street"
+            df.at[idx, PRECISION_COL] = "none"
             failed += 1
+            _fire_checkpoint()
             continue
 
         # Flag descriptions (not real addresses)
         if street in FLAG_DESCRIPTIONS:
             df.at[idx, "geocode_method"] = "flagged_description"
+            df.at[idx, PRECISION_COL] = "none"
             failed += 1
+            _fire_checkpoint()
             continue
 
         # Check cache
         cache_key = (street, num, loc_type, st2)
         if cache_key in cache:
-            lat, lon = cache[cache_key]
-            if lat is not None:
-                df.at[idx, "קו_רוחב"] = lat
-                df.at[idx, "קו_אורך"] = lon
+            hit = cache[cache_key]
+            if hit["lat"] is not None:
+                df.at[idx, "קו_רוחב"] = hit["lat"]
+                df.at[idx, "קו_אורך"] = hit["lon"]
                 df.at[idx, "geocode_method"] = "nominatim_cached"
+                df.at[idx, PRECISION_COL] = hit["precision"]
+                df.at[idx, "geocode_query"] = hit["query"]
                 geocoded += 1
             else:
+                df.at[idx, PRECISION_COL] = "none"
                 failed += 1
+            _fire_checkpoint()
             continue
 
         # Build candidates and try each
         candidates = _build_candidates(street, num, loc_type, st2)
-        lat, lon = None, None
+        lat, lon, place_rank = None, None, None
+        matched_query = None
 
         for query in candidates:
-            lat, lon = _nominatim_geocode_one(geolocator, query)
+            lat, lon, pr, _ = _nominatim_geocode_one(geolocator, query)
             time.sleep(NOMINATIM_DELAY)
 
             if lat is not None:
-                # Sanity check: is the result actually in Herzliya?
                 if _is_in_herzliya(lat, lon):
+                    place_rank = pr
+                    matched_query = query
                     break
                 else:
-                    # Result is outside Herzliya — try next candidate
-                    lat, lon = None, None
+                    lat, lon, place_rank = None, None, None
 
-        cache[cache_key] = (lat, lon)
+        precision = "none"
+        if lat is not None:
+            precision = "address" if place_rank == 30 else "street"
+
+        cache[cache_key] = {"lat": lat, "lon": lon, "precision": precision,
+                            "query": matched_query}
 
         if lat is not None:
             df.at[idx, "קו_רוחב"] = lat
             df.at[idx, "קו_אורך"] = lon
             df.at[idx, "geocode_method"] = "nominatim"
+            df.at[idx, PRECISION_COL] = precision
+            df.at[idx, "geocode_query"] = matched_query
             geocoded += 1
         else:
+            df.at[idx, PRECISION_COL] = "none"
             failed += 1
 
         if progress_cb and (i + 1) % 10 == 0:
             progress_cb("nominatim", i + 1, total, geocoded, failed)
+
+        _fire_checkpoint()
 
     log.info(f"Nominatim: geocoded {geocoded}, failed {failed}")
     if progress_cb:
@@ -620,7 +506,8 @@ def osm_centroid_pass(df: pd.DataFrame) -> pd.DataFrame:
     For rows still missing coordinates, try the baked-in OSM street centroids.
     This is a street-level fallback (no house-number precision).
     """
-    for col in ["קו_רוחב", "קו_אורך", "geocode_method"]:
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL,
+                "geocode_query"]:
         if col not in df.columns:
             df[col] = None
 
@@ -639,6 +526,8 @@ def osm_centroid_pass(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "קו_רוחב"] = lat
             df.at[idx, "קו_אורך"] = lon
             df.at[idx, "geocode_method"] = "osm_centroid"
+            df.at[idx, PRECISION_COL] = "street"
+            df.at[idx, "geocode_query"] = street
             rescued += 1
 
     log.info(f"OSM centroids: rescued {rescued} rows")
@@ -841,13 +730,16 @@ def _normalise_bldg_num(raw) -> Optional[str]:
 
 
 def gis_rescue_pass(df: pd.DataFrame,
-                    progress_cb: Optional[Callable] = None) -> pd.DataFrame:
+                    progress_cb: Optional[Callable] = None,
+                    checkpoint_cb: Optional[Callable] = None,
+                    checkpoint_every: int = 100) -> pd.DataFrame:
     """
     For rows still missing coordinates, try the Herzliya GIS portal.
     Uses Playwright to auto-retrieve the JWT token.
     Gracefully skips if Playwright is not installed or portal is unreachable.
     """
-    for col in ["קו_רוחב", "קו_אורך", "geocode_method"]:
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL,
+                "geocode_query"]:
         if col not in df.columns:
             df[col] = None
 
@@ -915,6 +807,8 @@ def gis_rescue_pass(df: pd.DataFrame,
                 df.at[idx, "קו_רוחב"] = lat
                 df.at[idx, "קו_אורך"] = lon
                 df.at[idx, "geocode_method"] = "gis_intersection"
+                df.at[idx, PRECISION_COL] = "street"
+                df.at[idx, "geocode_query"] = gis_name
                 stats["intersection"] += 1
             continue
 
@@ -928,6 +822,7 @@ def gis_rescue_pass(df: pd.DataFrame,
 
         if not buildings:
             df.at[idx, "geocode_method"] = df.at[idx, "geocode_method"] or "unresolved"
+            df.at[idx, PRECISION_COL] = "none"
             stats["unresolved"] += 1
             continue
 
@@ -935,7 +830,6 @@ def gis_rescue_pass(df: pd.DataFrame,
         is_street_level = (bldg_str is None or bldg_str == "0")
 
         if is_street_level:
-            # Street centroid
             mx = sum(b["x_itm"] for b in buildings) / len(buildings)
             my = sum(b["y_itm"] for b in buildings) / len(buildings)
             lat, lon = _itm_to_wgs84(mx, my)
@@ -943,9 +837,10 @@ def gis_rescue_pass(df: pd.DataFrame,
                 df.at[idx, "קו_רוחב"] = lat
                 df.at[idx, "קו_אורך"] = lon
                 df.at[idx, "geocode_method"] = "gis_centroid"
+                df.at[idx, PRECISION_COL] = "street"
+                df.at[idx, "geocode_query"] = gis_name
                 stats["centroid"] += 1
         else:
-            # Try exact building match
             exact = [b for b in buildings if b["bldg_num"] == bldg_str]
             if exact:
                 lat, lon = _itm_to_wgs84(exact[0]["x_itm"], exact[0]["y_itm"])
@@ -953,9 +848,10 @@ def gis_rescue_pass(df: pd.DataFrame,
                     df.at[idx, "קו_רוחב"] = lat
                     df.at[idx, "קו_אורך"] = lon
                     df.at[idx, "geocode_method"] = "gis_exact"
+                    df.at[idx, PRECISION_COL] = "address"
+                    df.at[idx, "geocode_query"] = gis_name
                     stats["exact"] += 1
             else:
-                # Nearest building number
                 target = int(bldg_str)
                 numbered = []
                 for b in buildings:
@@ -969,9 +865,10 @@ def gis_rescue_pass(df: pd.DataFrame,
                         df.at[idx, "קו_רוחב"] = lat
                         df.at[idx, "קו_אורך"] = lon
                         df.at[idx, "geocode_method"] = "gis_nearest"
+                        df.at[idx, PRECISION_COL] = "near_address"
+                        df.at[idx, "geocode_query"] = gis_name
                         stats["nearest"] += 1
                 else:
-                    # Fallback to centroid
                     mx = sum(b["x_itm"] for b in buildings) / len(buildings)
                     my = sum(b["y_itm"] for b in buildings) / len(buildings)
                     lat, lon = _itm_to_wgs84(mx, my)
@@ -979,12 +876,17 @@ def gis_rescue_pass(df: pd.DataFrame,
                         df.at[idx, "קו_רוחב"] = lat
                         df.at[idx, "קו_אורך"] = lon
                         df.at[idx, "geocode_method"] = "gis_centroid"
+                        df.at[idx, PRECISION_COL] = "street"
+                        df.at[idx, "geocode_query"] = gis_name
                         stats["centroid"] += 1
 
         if progress_cb and (i + 1) % 10 == 0:
             progress_cb("gis", i + 1, total,
                          stats["exact"] + stats["nearest"] + stats["centroid"] + stats["intersection"],
                          stats["unresolved"])
+
+        if checkpoint_cb and (i + 1) % checkpoint_every == 0:
+            checkpoint_cb(df)
 
     log.info(f"GIS rescue: exact={stats['exact']}, nearest={stats['nearest']}, "
              f"centroid={stats['centroid']}, intersection={stats['intersection']}, "
@@ -1005,7 +907,9 @@ def gis_rescue_pass(df: pd.DataFrame,
 def geocode_dataframe(df: pd.DataFrame,
                       progress_cb: Optional[Callable] = None,
                       skip_nominatim: bool = False,
-                      skip_gis: bool = False) -> tuple:
+                      skip_gis: bool = False,
+                      checkpoint_cb: Optional[Callable] = None,
+                      checkpoint_every: int = 100) -> tuple:
     """
     Run the full geocoding pipeline on a cleaned DataFrame.
 
@@ -1028,26 +932,35 @@ def geocode_dataframe(df: pd.DataFrame,
         stats dict with counts per method.
     """
     # Ensure columns exist
-    for col in ["קו_רוחב", "קו_אורך", "geocode_method"]:
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL, "geocode_query"]:
         if col not in df.columns:
             df[col] = None
+
+    run_id = str(uuid.uuid4())
+    df["geocode_run_id"] = run_id
 
     # Pass 1: Nominatim
     if not skip_nominatim:
         if progress_cb:
             progress_cb("status", 0, 0, 0, 0)
-        df = nominatim_pass(df, progress_cb)
+        df = nominatim_pass(df, progress_cb,
+                            checkpoint_cb=checkpoint_cb,
+                            checkpoint_every=checkpoint_every)
 
     # Pass 2: OSM centroids (always runs, it's offline and instant)
     df = osm_centroid_pass(df)
 
     # Pass 3: GIS rescue
     if not skip_gis:
-        df = gis_rescue_pass(df, progress_cb)
+        df = gis_rescue_pass(df, progress_cb,
+                             checkpoint_cb=checkpoint_cb,
+                             checkpoint_every=checkpoint_every)
 
     # Mark remaining unresolved
     still_missing = df["קו_רוחב"].isna() | (df["קו_רוחב"].astype(str).str.strip() == "")
-    df.loc[still_missing & df["geocode_method"].isna(), "geocode_method"] = "unresolved"
+    unresolved_mask = still_missing & df["geocode_method"].isna()
+    df.loc[unresolved_mask, "geocode_method"] = "unresolved"
+    df.loc[unresolved_mask, PRECISION_COL] = "none"
 
     # Attach official street code from municipal registry (best-effort, silent on miss)
     if STREET_REGISTRY and "רחוב_ראשי" in df.columns:
@@ -1072,6 +985,8 @@ def geocode_dataframe(df: pd.DataFrame,
         "total_unresolved": total_unresolved,
         "coverage_pct":     round(total_geocoded / total_rows * 100, 1) if total_rows else 0,
         "method_counts":    method_counts,
+        "pipeline_version": PIPELINE_VERSION,
+        "geocode_run_id":   run_id,
     }
 
     log.info(f"Geocoding complete: {total_geocoded}/{total_rows} "

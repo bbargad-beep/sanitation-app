@@ -1,0 +1,560 @@
+{
+  "אוטו ורבורג": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "אוטו וורבורג",
+    "gis": null
+  },
+  "אור חיים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "אור החיים",
+    "gis": "אור החיים"
+  },
+  "אורי צבי גרינברג": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "גרינברג אורי צבי"
+  },
+  "אייבי נתן מיכל המיחזור האלקטרוני": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "אייבי נתן"
+  },
+  "אלט נויילנד": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": "דרך אלטנוילנד",
+    "gis": null
+  },
+  "אלי לנדאו עד נילי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "שד' אלי לנדאו"
+  },
+  "אלמוג": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "אלומות"
+  },
+  "אנילביץ מרדכי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מרדכי אנילביץ",
+    "gis": "אנילביץ"
+  },
+  "אנצו סירני": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "סירני",
+    "gis": "סירני"
+  },
+  "ארגוב סשה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "סשה ארגוב",
+    "gis": null
+  },
+  "אריה לייב יפה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יפה אריה לייב",
+    "gis": "יפה אריה לייב"
+  },
+  "בית הראשונים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "הראשונים"
+  },
+  "גיבורי עציון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "גבורי עציון",
+    "gis": "גבורי עציון"
+  },
+  "דפנה האשל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "האשל",
+    "gis": "__INTERSECTION__דפנה__האשל"
+  },
+  "הגדעונים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "הגדוד העברי"
+  },
+  "הדודאים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "דודאים"
+  },
+  "הדודאים שביל אדמית": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "דודאים"
+  },
+  "הדסים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "ההדסים"
+  },
+  "הלותם": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "הלוטם",
+    "gis": "לוטם"
+  },
+  "המעין": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "המעיין"
+  },
+  "המפל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "הכרמל"
+  },
+  "הנשיא יצחק בן צבי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יצחק בן צבי",
+    "gis": null
+  },
+  "העליה השניה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "העלייה השנייה",
+    "gis": null
+  },
+  "הפלמ\"ח": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "פלמח",
+    "gis": null
+  },
+  "הראובני דוד": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "דוד הראובני",
+    "gis": "הראובני"
+  },
+  "הרב נורוק": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "נורוק"
+  },
+  "הרב ניסים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "הרב יצחק ניסים"
+  },
+  "הרימונים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "הרמונים"
+  },
+  "הרכבת בטיילת שליד קפה גן": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "טיילת חיים הרצוג"
+  },
+  "הרכבת בעליה לגשר הולכי רגל": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "טיילת חיים הרצוג"
+  },
+  "השונית עד מלון דניאל": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "השונית"
+  },
+  "ווינגיט": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "וינגייט",
+    "gis": "וינגייט"
+  },
+  "זיסו א.ל.": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "זיסו",
+    "gis": "זיסו"
+  },
+  "חוף הים": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף ים": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף-הים": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף-הים - מרינה)": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף-הים -רשות החופים)": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף-הים .-רשות החופים)": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חוף-הים 0-רשות החופים)": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חיים גרשון": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "חנה רובינא": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "רובינא חנה"
+  },
+  "חתם סופר": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "חתם סופר",
+    "gis": "חת\"ם סופר"
+  },
+  "טשרנחובסקי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "טשרניחובסקי",
+    "gis": "טשרניחובסקי"
+  },
+  "י.ל.גורדון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "י ל גורדון",
+    "gis": "י.ל. גורדון"
+  },
+  "יגאל אלון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "אלוף יגאל אלון"
+  },
+  "יהושוע בן נון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יהושע בן נון",
+    "gis": "יהושע בן נון"
+  },
+  "יהושפט המלך מול": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יהושפט המלך",
+    "gis": "יהושפט המלך"
+  },
+  "יוסף נדבה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "נדבה יוסף"
+  },
+  "יל גורדון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יהודה לייב גורדון",
+    "gis": null
+  },
+  "ילגורדון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יהודה לייב גורדון",
+    "gis": null
+  },
+  "יצחק נגר": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "נג'ר יצחק",
+    "gis": "נג׳ר יצחק"
+  },
+  "ישראל ישעיהו": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "ישעיהו ישראל",
+    "gis": "ישעיהו ישראל"
+  },
+  "כ'": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "כביש",
+    "gis": null
+  },
+  "כביש החוף בחלק של גב ים !!!": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "כביש החוף תחנת דלק פז רונית": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "כיכר הציונות": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": "ככר הציונות",
+    "gis": null
+  },
+  "כנפי נשרים מאלתרמן עד הבריגדה אונברסיטה": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "כנפי נשרים"
+  },
+  "כנפי נשרים מאלתרמן עד הבריגדה בכניסה לחניה של שדה התעופה": {
+    "status": "resolvable",
+    "note": "description resolved via GIS",
+    "nominatim": null,
+    "gis": "כנפי נשרים"
+  },
+  "לחי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "לח\"י"
+  },
+  "מהר\"ל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מהרל",
+    "gis": null
+  },
+  "מוהוליבר": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מוהליבר",
+    "gis": "מוהליבר"
+  },
+  "מורי עפארי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מורי עופרי",
+    "gis": "מורי עופרי"
+  },
+  "מנחם בגין שד": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מנחם בגין",
+    "gis": "שד בגין מנחם"
+  },
+  "מרזוק משה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "משה מרזוק",
+    "gis": "מרזוק"
+  },
+  "משה חניון צחי": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "מתיתיהו": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "מתתיהו",
+    "gis": "מתתיהו"
+  },
+  "נגר יצחק": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "נג'ר יצחק",
+    "gis": "נג׳ר יצחק"
+  },
+  "נוה עובד": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "נווה עובד",
+    "gis": "שד נוה עובד"
+  },
+  "סנה משה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "משה סנה",
+    "gis": null
+  },
+  "פסמן משה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "משה פסמן",
+    "gis": null
+  },
+  "פתח תקוה": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "דרך פתח תקווה",
+    "gis": "פתח תקווה"
+  },
+  "קורצ'ק יאנוש": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יאנוש קורצאק",
+    "gis": "קורצ'אק"
+  },
+  "קורצק יאנוש": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "יאנוש קורצ'אק",
+    "gis": null
+  },
+  "קפלינסקי": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "קפלנסקי",
+    "gis": "קפלנסקי"
+  },
+  "קק ל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "קרן קיימת לישראל",
+    "gis": null
+  },
+  "קק\"ל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "קרן קיימת לישראל",
+    "gis": "הקרן הקיימת"
+  },
+  "קקל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "קרן קיימת לישראל",
+    "gis": null
+  },
+  "ראשל צ": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "דרך ראשון לציון",
+    "gis": null
+  },
+  "ראשל\"צ": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "דרך ראשון לציון",
+    "gis": "ראשון לציון"
+  },
+  "ראשלצ": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "דרך ראשון לציון",
+    "gis": null
+  },
+  "רח": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "רחוב",
+    "gis": null
+  },
+  "רפי וקנין": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  },
+  "שביל אבו חצירא שירת גאולים": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "שירת גאולים"
+  },
+  "שד": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שדרות",
+    "gis": null
+  },
+  "שד אלי לנדאו": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שדרות אלי לנדאו",
+    "gis": "שד' אלי לנדאו"
+  },
+  "שד יעקב לנצט": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שדרות יעקב לנצט",
+    "gis": "לנצט יעקוב"
+  },
+  "שוידלסון": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שוידלסן",
+    "gis": null
+  },
+  "שזר": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "זלמן שזר",
+    "gis": "שז\"ר"
+  },
+  "שחל": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": "שח\"ל"
+  },
+  "שלום רוזנלפלד": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שלום רוזנפלד",
+    "gis": "שלום רוזנפלד"
+  },
+  "שלומית כהן-קישיק": {
+    "status": "resolvable",
+    "note": "",
+    "nominatim": "שולמית כהן-קישיק",
+    "gis": null
+  },
+  "שמעון לביא בגינת לביא ליד הספסל": {
+    "status": "unresolvable",
+    "note": "",
+    "nominatim": null,
+    "gis": null
+  }
+}

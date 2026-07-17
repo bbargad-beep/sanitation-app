@@ -425,106 +425,124 @@ def detect_personal_info(desc):
 #  MAIN PIPELINE
 # ============================================================================
 
-def run(input_file=INPUT_FILE):
-    print(f"Loading raw export: {input_file}")
-    df = pd.read_excel(input_file)
-    n = len(df)
-    print(f"  {n:,} rows loaded.")
+def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
+    """
+    Clean a raw CRM 360 export DataFrame into the structured analytical dataset.
 
+    This is the single authoritative clean path — both the app and the CLI
+    use this function. Returns (df_clean, stats).
+
+    Provenance columns added:
+      סיווג_מקור    — how the category was determined (map / topic_fallback / passthrough)
+      אחריות_מקור   — how responsibility was determined (map / keyword:<resp> / unresolved)
+      מסלול_כתובת   — which address-parsing branch matched (intersection / range / std /
+                      apt_suffix / multi / landmark / empty)
+    """
     rows = []
-    for _, r in df.iterrows():
-        clean_id, suffix = parse_ticket(r["מס' פניה"])
-        date, hour, weekday, month = parse_datetime(r["תאריך ושעת פתיחה"])
+    for _, r in df_raw.iterrows():
+        clean_id, suffix = parse_ticket(r.get("מס' פניה", ""))
+        date, hour, weekday, month = parse_datetime(r.get("תאריך ושעת פתיחה"))
 
         orig_sub = clean_text(r.get("תת נושא"))
-        new_cat  = CATEGORY_MAP.get(orig_sub, orig_sub)   # fall back to original
-        substance = SUBSTANCE_MAP.get(orig_sub, "לא ידוע")
-        asset     = ASSET_MAP.get(orig_sub, "לא ידוע")
-        resp      = RESPONSIBILITY_MAP.get(new_cat, "א.מ.ל")
 
-        loc = parse_address(r.get("כתובת ואתר/מוסד"))
+        # Category classification with provenance
+        if orig_sub and orig_sub in CATEGORY_MAP:
+            new_cat = CATEGORY_MAP[orig_sub]
+            cat_source = "map"
+        elif not orig_sub:
+            main_topic = clean_text(r.get("נושא", ""))
+            new_cat = TOPIC_MAP.get(main_topic, "לא מסווג")
+            cat_source = "topic_fallback"
+        else:
+            new_cat = orig_sub
+            cat_source = "passthrough"
+
+        substance = SUBSTANCE_MAP.get(orig_sub, "לא ידוע")
+        asset = ASSET_MAP.get(orig_sub, "לא ידוע")
+
+        # Responsibility with keyword resolution and provenance
+        resp = resolve_responsibility(new_cat, r.get("תיאור", ""))
+        base_resp = RESPONSIBILITY_MAP.get(new_cat, "א.מ.ל")
+        if base_resp != "א.מ.ל":
+            resp_source = "map"
+        elif resp != "א.מ.ל":
+            resp_source = f"keyword:{resp}"
+        else:
+            resp_source = "unresolved"
+
+        # Address parsing with route provenance
+        loc = parse_address(r.get("כתובת ואתר/מוסד", ""))
+        loc_type = loc["סוג_מיקום"] or ""
+        if loc_type == "צומת":
+            addr_route = "intersection"
+        elif loc_type == "טווח בתים":
+            addr_route = "range"
+        elif loc_type == "כתובת" and loc["מספר_בית"]:
+            # Check if it's an apt-suffix or multi match
+            raw_addr = clean_text(r.get("כתובת ואתר/מוסד", ""))
+            if re.search(r"\d+\s*[+&]\s*\d+\s*$", raw_addr):
+                addr_route = "multi"
+            elif re.search(r"\d+\s*[א-ת]{1,2}[\'׳]?\s*$", raw_addr):
+                addr_route = "apt_suffix"
+            else:
+                addr_route = "std"
+        elif loc_type in ("ציון דרך", ""):
+            addr_route = "landmark"
+        elif loc_type == "ללא רחוב":
+            addr_route = "empty"
+        else:
+            addr_route = "landmark"
 
         rows.append({
-            "מס' פניה": clean_id,
-            "תאריך": date,
-            "שעה": hour,
-            "יום": weekday,
-            "חודש": month,
-            "סטטוס פנייה": r.get("סטטוס פנייה"),
-            "נושא": r.get("נושא"),
-            "תת_נושא_חדש": new_cat,
-            "חומר": substance,
-            "אחריות": resp,
-            "נכס": asset,
-            "רחוב_ראשי": loc["רחוב_ראשי"],
-            "רחוב_משני": loc["רחוב_משני"],
-            "מספר_בית": loc["מספר_בית"],
-            "סוג_מיקום": loc["סוג_מיקום"],
-            "תיאור": r.get("תיאור"),
-            "הערת_מיקום": loc["הערת_מיקום"],
-            "תלונה_חוזרת": None,          # filled after recurring calc
-            "בקשת_חזרה": detect_callback(r.get("תיאור")),
-            "מידע_אישי": detect_personal_info(r.get("תיאור")),
-            "סיומת_פניה": suffix,
-            "כתובת ואתר/מוסד": r.get("כתובת ואתר/מוסד"),
-            "רחוב": loc["רחוב"],
-            "הערת_כתובת": loc["הערת_כתובת"],
-            "מחלקה": r.get("מחלקה"),
-            "תת נושא מקורי": orig_sub,
-            "מספר_חזרה": None,            # filled after recurring calc
-            "_needs_review": loc["_needs_review"],
+            "מס' פניה": clean_id, "תאריך": date, "שעה": hour, "יום": weekday, "חודש": month,
+            "סטטוס פנייה": r.get("סטטוס פנייה"), "נושא": r.get("נושא"),
+            "תת_נושא_חדש": new_cat, "חומר": substance, "אחריות": resp, "נכס": asset,
+            "רחוב_ראשי": loc["רחוב_ראשי"], "רחוב_משני": loc["רחוב_משני"],
+            "מספר_בית": loc["מספר_בית"], "סוג_מיקום": loc["סוג_מיקום"],
+            "תיאור": r.get("תיאור"), "הערת_מיקום": loc["הערת_מיקום"],
+            "תלונה_חוזרת": None, "בקשת_חזרה": detect_callback(r.get("תיאור")),
+            "מידע_אישי": detect_personal_info(r.get("תיאור")), "סיומת_פניה": suffix,
+            "כתובת ואתר/מוסד": r.get("כתובת ואתר/מוסד"), "רחוב": loc["רחוב"],
+            "הערת_כתובת": loc["הערת_כתובת"], "מחלקה": r.get("מחלקה"),
+            "תת נושא מקורי": orig_sub, "מספר_חזרה": None,
+            "סיווג_מקור": cat_source, "אחריות_מקור": resp_source, "מסלול_כתובת": addr_route,
+            "תוקן_אוטומטית": False,
         })
 
     out = pd.DataFrame(rows)
-
-    # ----- Recurring-complaint detection (structural method) ----------------
-    # Group by (main street + house number + analytical category), order by
-    # date, and number each occurrence. Occurrence > 1 = recurring.
     out["_date"] = pd.to_datetime(out["תאריך"], errors="coerce")
     out = out.sort_values("_date").reset_index(drop=True)
-    out["מספר_חזרה"] = (
-        out.groupby(["רחוב_ראשי", "מספר_בית", "תת_נושא_חדש"]).cumcount() + 1
-    )
+    out["מספר_חזרה"] = out.groupby(["רחוב_ראשי", "מספר_בית", "תת_נושא_חדש"]).cumcount() + 1
     out["תלונה_חוזרת"] = (out["מספר_חזרה"] > 1).astype(int)
     out = out.drop(columns=["_date"])
-
-    # ----- Split off the review file ----------------------------------------
-    review = out[
-        (out["_needs_review"]) | (out["אחריות"] == "א.מ.ל")
-    ].copy()
-    out = out.drop(columns=["_needs_review"])
-    review = review.drop(columns=["_needs_review"])
-
-    # ----- Save outputs ------------------------------------------------------
-    base = os.path.splitext(input_file)[0]
-    main_path   = base + "_מנוקה.xlsx"
-    review_path = base + "_לבדיקה_ידנית.xlsx"
-
-    # final column order (matches the verified structured dataset)
-    col_order = ["מס' פניה", "תאריך", "שעה", "יום", "חודש", "סטטוס פנייה",
-                 "נושא", "תת_נושא_חדש", "חומר", "אחריות", "נכס", "רחוב_ראשי",
-                 "רחוב_משני", "מספר_בית", "סוג_מיקום", "תיאור", "הערת_מיקום",
-                 "תלונה_חוזרת", "בקשת_חזרה", "מידע_אישי", "סיומת_פניה",
-                 "כתובת ואתר/מוסד", "רחוב", "הערת_כתובת", "מחלקה",
-                 "תת נושא מקורי", "מספר_חזרה"]
-    out = out[col_order]
-
-    # Keep ticket IDs as clean text (never coerced to 999001.0 style floats)
     out["מס' פניה"] = out["מס' פניה"].astype(str).str.replace(r"\.0$", "", regex=True)
 
-    out.to_excel(main_path, index=False)
-    review.to_excel(review_path, index=False)
+    stats = {
+        "rows": len(out),
+        "recurring_rate": round(out["תלונה_חוזרת"].mean() * 100, 1) if len(out) else 0,
+        "unknown_resp_rate": round((out["אחריות"] == "א.מ.ל").mean() * 100, 1) if len(out) else 0,
+    }
 
-    # ----- Summary -----------------------------------------------------------
+    return out, stats
+
+
+def run(input_file=INPUT_FILE):
+    """CLI wrapper — delegates to clean_dataframe(), writes output files."""
+    print(f"Loading raw export: {input_file}")
+    df_raw = pd.read_excel(input_file)
+    print(f"  {len(df_raw):,} rows loaded.")
+
+    out, stats = clean_dataframe(df_raw)
+
+    base = os.path.splitext(input_file)[0]
+    main_path = base + "_מנוקה.xlsx"
+    out.to_excel(main_path, index=False)
+
     print("\n── Done ─────────────────────────────────────")
-    print(f"  Structured file : {main_path}  ({len(out):,} rows)")
-    print(f"  Needs review    : {review_path}  ({len(review):,} rows)")
-    print(f"  Recurring rate  : {out['תלונה_חוזרת'].mean()*100:.1f}%")
-    print(f"  Unknown resp.   : {(out['אחריות']=='א.מ.ל').mean()*100:.1f}%")
+    print(f"  Structured file : {main_path}  ({stats['rows']:,} rows)")
+    print(f"  Recurring rate  : {stats['recurring_rate']}%")
+    print(f"  Unknown resp.   : {stats['unknown_resp_rate']}%")
     print("─────────────────────────────────────────────")
-    print("\nNEXT MANUAL STEPS (see notes at top of file):")
-    print("  1. Canonicalize רחוב_ראשי against the official Herzliya street list.")
-    print("  2. Review the _לבדיקה_ידנית file (landmarks + unknown responsibility).")
 
 
 if __name__ == "__main__":
