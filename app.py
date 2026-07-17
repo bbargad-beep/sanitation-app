@@ -88,6 +88,27 @@ h1,h2,h3,p,div,span,label { direction:rtl; text-align:right; }
 .stTabs [data-baseweb="tab-list"] { flex-direction:row-reverse; }
 .stTabs [data-baseweb="tab"] { direction:rtl; }
 .dataframe { direction:rtl; }
+
+/* ── Dataframe scroll + cell readability ── */
+/* Allow the dataframe container to scroll horizontally */
+[data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] {
+    overflow-x: auto !important;
+    max-width: 100% !important;
+}
+/* Each column header and cell: don't let RTL hide text off the left edge.
+   ellipsis + LTR inside each cell keeps Hebrew readable without clipping. */
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataFrame"] [role="gridcell"] {
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    direction: rtl !important;
+    text-align: right !important;
+    padding-right: 8px !important;
+    padding-left: 4px !important;
+}
+/* Streamlit new dataframe (glide-data-grid) canvas fallback: ensure wrapper scrolls */
+.stDataFrame > div { overflow-x: auto !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -444,6 +465,31 @@ def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
     return buf.getvalue()
 
 
+def _render_flagged_table(df: pd.DataFrame, max_rows: int = 500):
+    """
+    Render a flagged-rows table with explicit column widths so the browser
+    shows a horizontal scrollbar instead of squishing all columns.
+    Strips internal _cols; shows only the most diagnostic fields.
+    """
+    COLS = {
+        "מס' פניה":     st.column_config.TextColumn("מס' פניה",    width=90),
+        "תאריך":        st.column_config.TextColumn("תאריך",        width=100),
+        "כתובת ואתר/מוסד": st.column_config.TextColumn("כתובת מקורית", width=200),
+        "רחוב_ראשי":   st.column_config.TextColumn("רחוב",         width=140),
+        "מספר_בית":    st.column_config.TextColumn("מס' בית",      width=80),
+        "סוג_מיקום":   st.column_config.TextColumn("סוג מיקום",    width=100),
+        "geocode_method": st.column_config.TextColumn("שיטת גאוקוד", width=120),
+        "_flag_labels": st.column_config.TextColumn("בעיות",        width=300),
+    }
+    present = [c for c in COLS if c in df.columns]
+    display = df[present].head(max_rows).copy()
+    col_cfg = {c: COLS[c] for c in present}
+    h = min(480, max(80, len(display) * 35 + 42))
+    st.dataframe(display, column_config=col_cfg, hide_index=True, height=h)
+    if len(df) > max_rows:
+        st.caption(f"מוצגות {max_rows} שורות ראשונות מתוך {len(df):,}")
+
+
 def _leaflet_map_html(df: pd.DataFrame, height: int = 400) -> str:
     """
     Build a self-contained Leaflet HTML fragment showing geocoded rows as pins.
@@ -562,7 +608,16 @@ if stage == "upload":
             else:
                 st.markdown('<div class="banner-success">✅ כל העמודות הנדרשות נמצאו</div>',
                             unsafe_allow_html=True)
-                st.dataframe(df_raw.head(5), use_container_width=True)
+                _preview_cols = [c for c in [
+                    "מס' פניה", "תאריך ושעת פתיחה", "כתובת ואתר/מוסד",
+                    "תת נושא", "סטטוס פנייה", "שם מגיש",
+                ] if c in df_raw.columns] or list(df_raw.columns[:6])
+                st.dataframe(
+                    df_raw[_preview_cols].head(5),
+                    hide_index=True,
+                    column_config={c: st.column_config.TextColumn(c, width=160)
+                                   for c in _preview_cols},
+                )
                 if st.button("▶ התחל עיבוד — נקה נתונים", type="primary", use_container_width=True):
                     with st.spinner("מנקה ומעבד..."):
                         df_clean = run_clean_in_memory(df_raw)
@@ -605,12 +660,16 @@ elif stage == "clean":
         if n_block > 0:
             breakdown_b = _flag_breakdown(flagged, "block")
             st.markdown("**🔴 פירוט בעיות חוסמות:**")
-            st.dataframe(breakdown_b, use_container_width=True, hide_index=True)
+            st.dataframe(breakdown_b, hide_index=True,
+                         column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
+                                        "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
     with col_bd2:
         if n_warn > 0:
             breakdown_w = _flag_breakdown(flagged, "warn")
             st.markdown("**🟡 פירוט אזהרות:**")
-            st.dataframe(breakdown_w, use_container_width=True, hide_index=True)
+            st.dataframe(breakdown_w, hide_index=True,
+                         column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
+                                        "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
 
     # ── Triage groups ───────────────────────────────────────────────────────
     _triage = fl.build_triage_groups(flagged)
@@ -619,12 +678,10 @@ elif stage == "clean":
                                   "_flag_labels"] if c in flagged.columns]
     if _tsumm["blocking"] > 0:
         with st.expander(f"🔴 חוסמות ({_tsumm['blocking']:,})", expanded=True):
-            st.dataframe(_triage["blocking"][_display_cols], use_container_width=True,
-                         hide_index=True)
+            _render_flagged_table(_triage["blocking"])
     if _tsumm["review"] > 0:
         with st.expander(f"🟡 לסקירה ({_tsumm['review']:,})", expanded=False):
-            st.dataframe(_triage["review"][_display_cols], use_container_width=True,
-                         hide_index=True)
+            _render_flagged_table(_triage["review"])
 
     # ── Download-first review Excel ─────────────────────────────────────────
     st.markdown('<div class="step-card"><h4>קובץ לבדיקה ידנית</h4>'
@@ -1379,11 +1436,22 @@ elif stage == "validate":
             c3.metric("רק ביחוס",     f"{result['only_reference']:,}")
 
             st.markdown("#### הסכמה לפי עמודה")
-            st.dataframe(result["per_column"].sort_values("אחוז_הסכמה"),
-                         use_container_width=True, hide_index=True)
-
+            st.dataframe(
+                result["per_column"].sort_values("אחוז_הסכמה"),
+                hide_index=True,
+                column_config={
+                    "עמודה":       st.column_config.TextColumn("עמודה",          width=160),
+                    "הסכמה":       st.column_config.NumberColumn("הסכמה",         width=80),
+                    "שונה":        st.column_config.NumberColumn("שונה",          width=80),
+                    "חסר_בצינור":  st.column_config.NumberColumn("חסר בצינור",    width=100),
+                    "אחוז_הסכמה":  st.column_config.NumberColumn("% הסכמה",       width=90,
+                                                                  format="%.1f%%"),
+                },
+            )
             with st.expander("📋 פרטי שורות שונות"):
-                st.dataframe(result["diff"], use_container_width=True, hide_index=True)
+                _diff_cfg = {c: st.column_config.TextColumn(c, width=140)
+                             for c in result["diff"].columns}
+                st.dataframe(result["diff"], column_config=_diff_cfg, hide_index=True)
         except Exception as e:
             st.error(f"שגיאה בהשוואה: {e}")
     elif ref_file is None:
