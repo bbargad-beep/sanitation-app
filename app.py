@@ -226,7 +226,8 @@ def _clear_checkpoint(filename: str):
 
 def run_clean_in_memory(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Delegate to the single authoritative clean path in clean_pipeline."""
-    df_clean, _ = cp.clean_dataframe(df_raw)
+    df_clean, cstats = cp.clean_dataframe(df_raw)
+    st.session_state["_clean_stats"] = cstats
     return df_clean
 
 
@@ -654,6 +655,90 @@ elif stage == "clean":
     </div>
     """, unsafe_allow_html=True)
 
+    # ── What the pipeline actually did ─────────────────────────────────────
+    with st.expander("🔍 מה השתנה? — פירוט עיבוד אוטומטי", expanded=False):
+        _cs = st.session_state.get("_clean_stats", {})
+
+        # 1. Address routing breakdown
+        if "מסלול_כתובת" in df.columns:
+            route_labels = {
+                "intersection": "צומת / פינת רחובות",
+                "range":        "טווח בתים",
+                "std":          "כתובת רגילה",
+                "apt_suffix":   "כתובת עם דירה/קומה",
+                "multi":        "מספר כתובות",
+                "landmark":     "ציון דרך",
+                "empty":        "ריקה / לא ניתן לפרוס",
+            }
+            rc = df["מסלול_כתובת"].value_counts().reset_index()
+            rc.columns = ["מסלול", "שורות"]
+            rc["מסלול"] = rc["מסלול"].map(lambda x: f"{route_labels.get(x, x)} ({x})")
+            st.markdown("**ניתוב כתובות — כיצד כל כתובת סווגה:**")
+            st.dataframe(rc, hide_index=True,
+                         column_config={
+                             "מסלול": st.column_config.TextColumn("מסלול", width=280),
+                             "שורות": st.column_config.NumberColumn("שורות", width=80),
+                         })
+
+        # 2. Category & responsibility provenance
+        if "סיווג_מקור" in df.columns:
+            cat_src = df["סיווג_מקור"].value_counts().reset_index()
+            cat_src.columns = ["מקור", "שורות"]
+            _src_labels = {
+                "map":             "מיפוי ישיר מ-CRM לקטגוריה",
+                "topic_fallback":  "קטגוריה נגזרה מתת-נושא",
+                "passthrough":     "נשמר כפי שהוא ממקור",
+            }
+            cat_src["מקור"] = cat_src["מקור"].map(lambda x: f"{_src_labels.get(x, x)}")
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                st.markdown("**מקור הקטגוריה:**")
+                st.dataframe(cat_src, hide_index=True,
+                             column_config={
+                                 "מקור":  st.column_config.TextColumn("מקור",  width=220),
+                                 "שורות": st.column_config.NumberColumn("שורות", width=80),
+                             })
+            if "אחריות_מקור" in df.columns:
+                with col_c2:
+                    resp_src = df["אחריות_מקור"].value_counts().reset_index()
+                    resp_src.columns = ["מקור", "שורות"]
+                    st.markdown("**מקור האחריות:**")
+                    st.dataframe(resp_src, hide_index=True,
+                                 column_config={
+                                     "מקור":  st.column_config.TextColumn("מקור",  width=220),
+                                     "שורות": st.column_config.NumberColumn("שורות", width=80),
+                                 })
+
+        # 3. Street corrections applied
+        from corrections import STREET_CORRECTIONS as _SC
+        if "רחוב_ראשי" in df.columns:
+            _corrected = df[df.get("תוקן_אוטומטית", pd.Series(False, index=df.index))]
+            n_street_fix = int(df.get("תוקן_אוטומטית", pd.Series(False, index=df.index)).sum()) \
+                if "תוקן_אוטומטית" in df.columns else 0
+            if n_street_fix:
+                st.markdown(f"**תיקוני רחוב אוטומטיים:** {n_street_fix:,} שורות תוקנו")
+                _fix_sample = df[df["תוקן_אוטומטית"] == True][
+                    [c for c in ["מס' פניה", "רחוב_ראשי", "מסלול_כתובת"] if c in df.columns]
+                ].head(10)
+                st.dataframe(_fix_sample, hide_index=True,
+                             column_config={c: st.column_config.TextColumn(c, width=140)
+                                            for c in _fix_sample.columns})
+            else:
+                st.caption("לא בוצעו תיקוני רחוב אוטומטיים.")
+
+        # 4. Auto-fix audit log entries
+        _audit_entries = al.load_log()
+        _autofix = [e for e in _audit_entries if e.get("source") == "auto_fix"]
+        if _autofix:
+            st.markdown(f"**תיקוני auto_fix ({len(_autofix):,} שינויים):**")
+            _af_df = pd.DataFrame(_autofix)[["ticket", "field", "old", "new"]].head(30)
+            _af_df.columns = ["פנייה", "שדה", "לפני", "אחרי"]
+            st.dataframe(_af_df, hide_index=True,
+                         column_config={c: st.column_config.TextColumn(c, width=130)
+                                        for c in _af_df.columns})
+        else:
+            st.caption("יומן auto_fix ריק — לא בוצעו שינויים אוטומטיים בסשן הנוכחי.")
+
     # ── Flag breakdown ──────────────────────────────────────────────────────
     col_bd1, col_bd2 = st.columns(2)
     with col_bd1:
@@ -866,10 +951,14 @@ elif stage == "geocode":
             rows_done = int(pd.to_numeric(
                 checkpoint["קו_רוחב"].astype(str).str.replace(",", ""), errors="coerce"
             ).notna().sum())
+            total_rows = len(checkpoint)
+            pct_done = rows_done / total_rows * 100 if total_rows else 0
             st.markdown(
-                f'<div class="banner-warn">⚠️ נמצא קובץ המשך מריצה קודמת — '
-                f'<strong>{rows_done:,}</strong> שורות כבר גאוקודדו. '
-                f'לחצו "המשך" להמשך מאותה נקודה, או "התחל מחדש" למחיקת ההתקדמות.</div>',
+                f'<div class="banner-warn">🔄 <strong>נמצא קובץ המשך מריצה קודמת!</strong><br>'
+                f'גאוקודדו <strong>{rows_done:,} מתוך {total_rows:,}</strong> שורות '
+                f'({pct_done:.0f}%). '
+                f'לחצו "המשך" כדי לחסוך את הזמן שכבר הושקע — '
+                f'רק {total_rows - rows_done:,} השורות הנותרות יעובדו.</div>',
                 unsafe_allow_html=True,
             )
             cr1, cr2 = st.columns(2)
@@ -890,8 +979,10 @@ elif stage == "geocode":
 
             if st.button("▶ הרץ גאוקוד", type="primary", use_container_width=True):
                 prog = st.progress(0.0, text="מתחיל גאוקוד...")
-                _checkpoint_counter = [0]
-                _df_ref = [df]  # mutable container so cb can access the live df
+                _df_ref = [df]
+
+                # Save an immediate checkpoint so a crash at row 1 is still resumable
+                _save_checkpoint(df, st.session_state.filename)
 
                 def cb(pass_name, current, total, geocoded, failed):
                     if total > 0:
@@ -904,8 +995,11 @@ elif stage == "geocode":
                     _df_ref[0] = df_snap
                     _save_checkpoint(df_snap, st.session_state.filename)
 
+                # checkpoint_every=25 — saves every 25 rows so closing mid-run
+                # loses at most 25 rows of work instead of 100
                 df_geo, gstats = gp.geocode_dataframe(df, progress_cb=cb,
-                                                       checkpoint_cb=checkpoint_cb)
+                                                       checkpoint_cb=checkpoint_cb,
+                                                       checkpoint_every=25)
                 _df_ref[0] = df_geo  # update ref (though run is done)
                 prog.progress(1.0, text="הושלם")
                 _clear_checkpoint(st.session_state.filename)  # clean up on success
