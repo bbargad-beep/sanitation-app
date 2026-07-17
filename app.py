@@ -965,19 +965,25 @@ elif stage == "geocode":
             with cr1:
                 if st.button("▶ המשך מנקודת עצירה", type="primary", use_container_width=True):
                     st.session_state.df = checkpoint
+                    st.session_state["_auto_geocode"] = True
                     _clear_checkpoint(st.session_state.filename)
                     st.rerun()
             with cr2:
-                if st.button("🗑️ התחל מחדש", use_container_width=True):
+                if st.button("🗑️ בטל והתחל גאוקוד מחדש", use_container_width=True):
                     _clear_checkpoint(st.session_state.filename)
+                    st.session_state.pop("_auto_geocode", None)
                     st.rerun()
         else:
             already = ("קו_רוחב" in df.columns and df["קו_רוחב"].notna().any())
-            if already:
+            if already and not st.session_state.get("_auto_geocode"):
                 st.markdown('<div class="banner-warn">⚠️ חלק מהשורות כבר מכילות קואורדינטות — '
                             'הגאוקוד ירוץ רק על שורות חסרות.</div>', unsafe_allow_html=True)
 
-            if st.button("▶ הרץ גאוקוד", type="primary", use_container_width=True):
+            _auto = st.session_state.pop("_auto_geocode", False)
+            if _auto or st.button(
+                "▶ המשך גאוקוד" if already else "▶ הרץ גאוקוד",
+                type="primary", use_container_width=True
+            ):
                 prog = st.progress(0.0, text="מתחיל גאוקוד...")
                 _df_ref = [df]
 
