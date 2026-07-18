@@ -851,7 +851,7 @@ elif stage == "clean":
         st.markdown("---")
         _total_q_rows = (
             sum(c["count"] for c in _clusters["unknown_subtopics"]) +
-            sum(c["count"] for c in _clusters["unresolved_resp"]) +
+            sum(c["total"] for c in _clusters["unresolved_resp"]) +
             sum(v["total"] for v in _st_vars)
         )
         st.markdown(
