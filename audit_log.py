@@ -14,7 +14,8 @@ import uuid
 from datetime import datetime, timezone
 
 _LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.jsonl")
-VALID_SOURCES = {"auto_fix", "manual_editor", "bulk_paste", "gis_retry", "waive"}
+VALID_SOURCES = {"auto_fix", "manual_editor", "bulk_paste", "gis_retry", "waive",
+                 "manual_review", "spot_check_approval", "user_qa"}
 
 
 def _default_log_path() -> str:

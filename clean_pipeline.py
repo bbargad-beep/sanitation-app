@@ -586,6 +586,107 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
     return out, stats
 
 
+# ============================================================================
+#  CLUSTER DETECTION & USER-ANSWER RESOLUTION
+# ============================================================================
+
+KNOWN_CATEGORIES_LIST = sorted(RESPONSIBILITY_MAP.keys())
+KNOWN_RESPONSIBILITIES = ["כשל עירוני", "התנהגות אזרח", "טבעי", "לא רלוונטי"]
+
+
+def find_clusters(df: pd.DataFrame) -> dict:
+    """
+    Find groups of uncertain rows that a single user answer can resolve.
+    Returns:
+      {"unknown_subtopics": [{value, count, examples}],
+       "unresolved_resp":   [{category, count}]}
+    """
+    clusters: dict = {"unknown_subtopics": [], "unresolved_resp": []}
+
+    if "סיווג_מקור" in df.columns and "תת נושא מקורי" in df.columns:
+        passthrough = df[df["סיווג_מקור"] == "passthrough"]
+        for val, grp in passthrough.groupby("תת נושא מקורי"):
+            val_str = str(val).strip()
+            if val_str and val_str not in ("nan", "None", ""):
+                examples = [
+                    str(r.get("תיאור", ""))[:60]
+                    for _, r in grp.head(2).iterrows()
+                    if str(r.get("תיאור", "")).strip()
+                ]
+                clusters["unknown_subtopics"].append(
+                    {"value": val_str, "count": len(grp), "examples": examples}
+                )
+        clusters["unknown_subtopics"].sort(key=lambda x: -x["count"])
+
+    if "אחריות_מקור" in df.columns and "תת_נושא_חדש" in df.columns:
+        unresolved = df[df["אחריות_מקור"] == "unresolved"]
+        for cat, grp in unresolved.groupby("תת_נושא_חדש"):
+            clusters["unresolved_resp"].append({"category": str(cat), "count": len(grp)})
+        clusters["unresolved_resp"].sort(key=lambda x: -x["count"])
+
+    return clusters
+
+
+def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
+    """
+    Apply user-provided answers to cluster questions and recompute confidence.
+    answers: {"subtopic:X": "category", "resp:Y": "responsibility"}
+    Skipped answers have value "__skip__" or empty string.
+    """
+    df = df.copy()
+    _tier = {"low": 0, "medium": 1, "high": 2}
+
+    for key, answer in answers.items():
+        if not answer or str(answer).strip() in ("__skip__", "", "nan"):
+            continue
+
+        if key.startswith("subtopic:"):
+            orig_sub = key[len("subtopic:"):]
+            if "תת נושא מקורי" in df.columns:
+                mask = df["תת נושא מקורי"] == orig_sub
+                if mask.any():
+                    df.loc[mask, "תת_נושא_חדש"] = answer
+                    df.loc[mask, "סיווג_מקור"] = "user_map"
+                    for idx in df[mask].index:
+                        desc = df.at[idx, "תיאור"] if "תיאור" in df.columns else ""
+                        new_resp = resolve_responsibility(answer, desc)
+                        df.at[idx, "אחריות"] = new_resp
+                        base_r = RESPONSIBILITY_MAP.get(answer, "א.מ.ל")
+                        if base_r != "א.מ.ל":
+                            df.at[idx, "אחריות_מקור"] = "map"
+                        elif new_resp != "א.מ.ל":
+                            df.at[idx, "אחריות_מקור"] = f"keyword:{new_resp}"
+
+        elif key.startswith("resp:"):
+            category = key[len("resp:"):]
+            if "תת_נושא_חדש" in df.columns and "אחריות" in df.columns:
+                mask = (df["תת_נושא_חדש"] == category) & (df["אחריות"] == "א.מ.ל")
+                if mask.any():
+                    df.loc[mask, "אחריות"] = answer
+                    df.loc[mask, "אחריות_מקור"] = "user_resp"
+
+    def _recompute(row):
+        cat_src  = str(row.get("סיווג_מקור", ""))
+        resp_src = str(row.get("אחריות_מקור", ""))
+        addr_r   = str(row.get("מסלול_כתובת", ""))
+        cat_conf  = ("high"   if cat_src in ("map", "user_map") else
+                     "medium" if cat_src == "topic_fallback" else "low")
+        resp_conf = ("high"   if resp_src in ("map", "user_resp") else
+                     "medium" if resp_src.startswith("keyword:") else "low")
+        if addr_r in ("std", "intersection", "range"):
+            addr_conf = "high"
+        elif addr_r in ("apt_suffix", "multi"):
+            addr_conf = "medium"
+        elif addr_r == "landmark":
+            addr_conf = "medium" if row.get("רחוב_ראשי") else "low"
+        else:
+            addr_conf = "low"
+        return min([cat_conf, resp_conf, addr_conf], key=lambda x: _tier[x])
+
+    df["_confidence"] = df.apply(_recompute, axis=1)
+    return df
+
+
 def run(input_file=INPUT_FILE):
     """CLI wrapper — delegates to clean_dataframe(), writes output files."""
     print(f"Loading raw export: {input_file}")
