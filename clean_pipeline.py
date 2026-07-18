@@ -493,6 +493,60 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
         else:
             addr_route = "landmark"
 
+        # ── Confidence scoring ────────────────────────────────────────────────
+        # Each classification gets a tier: high / medium / low.
+        # "high"   = deterministic rule, no ambiguity
+        # "medium" = heuristic/fallback, likely correct but worth a spot-check
+        # "low"    = could not be resolved confidently, needs human judgement
+        _tier = {"low": 0, "medium": 1, "high": 2}
+        conf_details = []
+
+        # Category
+        if cat_source == "map":
+            cat_conf = "high"
+            conf_details.append(f"קטגוריה:מיפוי ישיר — {orig_sub} ← {new_cat}:high")
+        elif cat_source == "topic_fallback":
+            cat_conf = "medium"
+            main_t = clean_text(r.get("נושא", ""))
+            conf_details.append(f"קטגוריה:נגזרה מנושא — {main_t} ← {new_cat}:medium")
+        else:
+            cat_conf = "low"
+            conf_details.append(f"קטגוריה:תת-נושא לא מזוהה — {orig_sub}:low")
+
+        # Responsibility
+        if resp_source == "map":
+            resp_conf = "high"
+            conf_details.append(f"אחריות:מיפוי ישיר — {new_cat} ← {resp}:high")
+        elif resp_source.startswith("keyword:"):
+            resp_conf = "medium"
+            conf_details.append(f"אחריות:הוסקה ממילות מפתח — {resp}:medium")
+        else:
+            resp_conf = "low"
+            conf_details.append(f"אחריות:לא נפתרה — נותרת א.מ.ל:low")
+
+        # Address
+        if addr_route in ("std", "intersection", "range"):
+            addr_conf = "high"
+            _route_he = {"std": "כתובת רגילה", "intersection": "צומת", "range": "טווח בתים"}
+            conf_details.append(f"כתובת:{_route_he.get(addr_route, addr_route)} — {loc.get('רחוב_ראשי', '')} {loc.get('מספר_בית', '')}:high")
+        elif addr_route in ("apt_suffix", "multi"):
+            addr_conf = "medium"
+            _route_he2 = {"apt_suffix": "עם סיומת דירה/קומה", "multi": "מספרים מרובים"}
+            conf_details.append(f"כתובת:{_route_he2.get(addr_route, addr_route)} — {loc.get('רחוב_ראשי', '')}:medium")
+        elif addr_route == "landmark":
+            if loc.get("רחוב_ראשי"):
+                addr_conf = "medium"
+                conf_details.append(f"כתובת:ציון דרך (ללא מספר בית) — {loc['רחוב_ראשי']}:medium")
+            else:
+                addr_conf = "low"
+                conf_details.append(f"כתובת:ציון דרך — לא זוהה רחוב ברור:low")
+        else:  # empty
+            addr_conf = "low"
+            raw_addr = clean_text(r.get("כתובת ואתר/מוסד", ""))
+            conf_details.append(f"כתובת:ריקה/לא ניתנת לפרסור — {raw_addr[:40] if raw_addr else 'ריק'}:low")
+
+        overall_conf = min([cat_conf, resp_conf, addr_conf], key=lambda x: _tier[x])
+
         rows.append({
             "מס' פניה": clean_id, "תאריך": date, "שעה": hour, "יום": weekday, "חודש": month,
             "סטטוס פנייה": r.get("סטטוס פנייה"), "נושא": r.get("נושא"),
@@ -507,6 +561,8 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
             "תת נושא מקורי": orig_sub, "מספר_חזרה": None,
             "סיווג_מקור": cat_source, "אחריות_מקור": resp_source, "מסלול_כתובת": addr_route,
             "תוקן_אוטומטית": False,
+            "_confidence": overall_conf,
+            "_confidence_details": " | ".join(conf_details),
         })
 
     out = pd.DataFrame(rows)
@@ -517,10 +573,14 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
     out = out.drop(columns=["_date"])
     out["מס' פניה"] = out["מס' פניה"].astype(str).str.replace(r"\.0$", "", regex=True)
 
+    conf_counts = out["_confidence"].value_counts().to_dict() if "_confidence" in out.columns else {}
     stats = {
         "rows": len(out),
         "recurring_rate": round(out["תלונה_חוזרת"].mean() * 100, 1) if len(out) else 0,
         "unknown_resp_rate": round((out["אחריות"] == "א.מ.ל").mean() * 100, 1) if len(out) else 0,
+        "conf_high":   conf_counts.get("high",   0),
+        "conf_medium": conf_counts.get("medium", 0),
+        "conf_low":    conf_counts.get("low",    0),
     }
 
     return out, stats

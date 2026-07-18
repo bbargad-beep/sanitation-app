@@ -635,7 +635,7 @@ if stage == "upload":
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  STAGE 2 — CLEAN (review via download + gate)
+#  STAGE 2 — CLEAN  (confidence-tiered review + explainability)
 # ══════════════════════════════════════════════════════════════════════════
 
 elif stage == "clean":
@@ -643,237 +643,402 @@ elif stage == "clean":
     flagged = fl.detect_flags(df, DATE_MIN, DATE_MAX, stage="clean")
     n_block = fl.count_blocking(flagged)
     n_warn  = fl.count_warnings(flagged)
-    n_clean = len(df) - n_block - n_warn
 
-    st.markdown("### שלב 2 — בדיקת ניקוי")
+    # ── Confidence tier counts ──────────────────────────────────────────────
+    _cs = st.session_state.get("_clean_stats", {})
+    n_high   = _cs.get("conf_high",   int((df.get("_confidence", pd.Series()) == "high").sum())   if "_confidence" in df.columns else 0)
+    n_medium = _cs.get("conf_medium", int((df.get("_confidence", pd.Series()) == "medium").sum()) if "_confidence" in df.columns else 0)
+    n_low    = _cs.get("conf_low",    int((df.get("_confidence", pd.Series()) == "low").sum())    if "_confidence" in df.columns else 0)
 
+    st.markdown("### שלב 2 — ניקוי: סקירת אמון ועדכון ידני")
+
+    # ── Four-card summary row ────────────────────────────────────────────────
+    _pct_auto = round(n_high / len(df) * 100) if len(df) else 0
     st.markdown(f"""
-    <div class="stat-row">
-      <div class="stat-card good"><div class="num">{n_clean:,}</div><div class="lbl">שורות תקינות</div></div>
-      <div class="stat-card alert"><div class="num">{n_block:,}</div><div class="lbl">דורשות תיקון</div></div>
-      <div class="stat-card warn"><div class="num">{n_warn:,}</div><div class="lbl">אזהרות בלבד</div></div>
+    <style>
+    .conf-row {{display:flex;gap:.9rem;margin-bottom:1.3rem;flex-direction:row-reverse;}}
+    .conf-card {{flex:1;border-radius:10px;padding:.9rem 1rem;text-align:center;
+                 box-shadow:0 1px 4px rgba(0,0,0,.07);}}
+    .conf-card .cn {{font-size:1.8rem;font-weight:700;line-height:1.1;}}
+    .conf-card .cl {{font-size:.76rem;margin-top:.25rem;}}
+    .conf-card .cs {{font-size:.7rem;margin-top:.15rem;opacity:.75;}}
+    .cc-green  {{background:#d1fae5;border:1px solid #6ee7b7;}}
+    .cc-green .cn  {{color:#065f46;}}
+    .cc-amber  {{background:#fef3c7;border:1px solid #fcd34d;}}
+    .cc-amber .cn  {{color:#92400e;}}
+    .cc-red    {{background:#fee2e2;border:1px solid #fca5a5;}}
+    .cc-red .cn    {{color:#991b1b;}}
+    .cc-gray   {{background:#f1f5f9;border:1px solid #cbd5e1;}}
+    .cc-gray .cn   {{color:#334155;}}
+    </style>
+    <div class="conf-row">
+      <div class="conf-card cc-green">
+        <div class="cn">{n_high:,}</div>
+        <div class="cl">✅ אוטומטי — בטוח</div>
+        <div class="cs">כלל דטרמיניסטי · לא נדרשת סקירה</div>
+      </div>
+      <div class="conf-card cc-amber">
+        <div class="cn">{n_medium:,}</div>
+        <div class="cl">🟡 בדיקת מדגם — הסתברותי</div>
+        <div class="cs">כלל היוריסטי · מומלץ לאשר מדגם</div>
+      </div>
+      <div class="conf-card cc-red">
+        <div class="cn">{n_low:,}</div>
+        <div class="cl">🔴 סקירה ידנית נדרשת</div>
+        <div class="cs">לא ניתן לסווג בוודאות · דורש שיפוט</div>
+      </div>
+      <div class="conf-card cc-gray">
+        <div class="cn">{n_block:,}</div>
+        <div class="cl">⛔ בעיות מבניות</div>
+        <div class="cs">נתון חסר/שגוי · חוסם המשך</div>
+      </div>
+    </div>
+    <div style="text-align:right;color:#475569;font-size:.84rem;margin-bottom:1rem;">
+      📊 <strong>{_pct_auto}%</strong> מהשורות עובדו בכלל דטרמיניסטי ואינן דורשות עיון.
+      נותרות <strong>{n_medium + n_low:,}</strong> לסקירה — <strong>{n_medium:,}</strong> למדגם ו-<strong>{n_low:,}</strong> לשיפוט ידני.
     </div>
     """, unsafe_allow_html=True)
 
-    # ── What the pipeline actually did ─────────────────────────────────────
-    with st.expander("🔍 מה השתנה? — פירוט עיבוד אוטומטי", expanded=False):
-        _cs = st.session_state.get("_clean_stats", {})
+    # ── Helper: render confidence detail badges ─────────────────────────────
+    def _render_conf_details(detail_str: str):
+        """Parse 'field:explanation:tier | ...' and render as colored HTML badges."""
+        if not detail_str or str(detail_str) in ("nan", "None", ""):
+            return ""
+        _colors = {
+            "high":   ("🟢", "#d1fae5", "#065f46"),
+            "medium": ("🟡", "#fef3c7", "#92400e"),
+            "low":    ("🔴", "#fee2e2", "#991b1b"),
+        }
+        parts = str(detail_str).split(" | ")
+        badges = []
+        for p in parts:
+            segs = p.rsplit(":", 1)
+            if len(segs) == 2:
+                text, tier = segs[0].strip(), segs[1].strip()
+                emoji, bg, fg = _colors.get(tier, ("⚪", "#f1f5f9", "#334155"))
+                badges.append(
+                    f'<span style="background:{bg};color:{fg};padding:3px 8px;'
+                    f'border-radius:12px;font-size:.78rem;margin:2px;display:inline-block;">'
+                    f'{emoji} {text}</span>'
+                )
+        return '<div style="direction:rtl;text-align:right;margin-top:4px;">' + " ".join(badges) + "</div>"
 
-        # 1. Address routing breakdown
-        if "מסלול_כתובת" in df.columns:
-            route_labels = {
-                "intersection": "צומת / פינת רחובות",
-                "range":        "טווח בתים",
-                "std":          "כתובת רגילה",
-                "apt_suffix":   "כתובת עם דירה/קומה",
-                "multi":        "מספר כתובות",
-                "landmark":     "ציון דרך",
-                "empty":        "ריקה / לא ניתן לפרוס",
-            }
-            rc = df["מסלול_כתובת"].value_counts().reset_index()
-            rc.columns = ["מסלול", "שורות"]
-            rc["מסלול"] = rc["מסלול"].map(lambda x: f"{route_labels.get(x, x)} ({x})")
-            st.markdown("**ניתוב כתובות — כיצד כל כתובת סווגה:**")
-            st.dataframe(rc, hide_index=True,
-                         column_config={
-                             "מסלול": st.column_config.TextColumn("מסלול", width=280),
-                             "שורות": st.column_config.NumberColumn("שורות", width=80),
-                         })
+    # ════════════════════════════════════════════════════════
+    #  TIER A — Auto-applied (HIGH confidence)
+    # ════════════════════════════════════════════════════════
+    with st.expander(f"✅ עובד אוטומטית — {n_high:,} שורות ({_pct_auto}%)", expanded=False):
+        st.markdown(
+            '<div style="color:#065f46;background:#d1fae5;border-radius:8px;'
+            'padding:.7rem 1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
+            '🔒 שורות אלו עובדו באמצעות כללים דטרמיניסטיים בלבד — מיפוי קטגוריה ישיר, '
+            'אחריות שנגזרה ממבנה, וכתובת עם רחוב ומספר ברורים. '
+            'אין צורך בסקירה.</div>',
+            unsafe_allow_html=True,
+        )
+        if "_confidence" in df.columns:
+            _high_df = df[df["_confidence"] == "high"]
+            if not _high_df.empty:
+                _h_sample = _high_df[
+                    [c for c in ["מס' פניה", "תת_נושא_חדש", "אחריות", "רחוב_ראשי", "מספר_בית"]
+                     if c in _high_df.columns]
+                ].head(5)
+                st.caption(f"דוגמה — 5 שורות מתוך {n_high:,}:")
+                st.dataframe(_h_sample, hide_index=True,
+                             column_config={c: st.column_config.TextColumn(c, width=160)
+                                            for c in _h_sample.columns})
 
-        # 2. Category & responsibility provenance
-        if "סיווג_מקור" in df.columns:
-            cat_src = df["סיווג_מקור"].value_counts().reset_index()
-            cat_src.columns = ["מקור", "שורות"]
-            _src_labels = {
-                "map":             "מיפוי ישיר מ-CRM לקטגוריה",
-                "topic_fallback":  "קטגוריה נגזרה מתת-נושא",
-                "passthrough":     "נשמר כפי שהוא ממקור",
-            }
-            cat_src["מקור"] = cat_src["מקור"].map(lambda x: f"{_src_labels.get(x, x)}")
-            col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                st.markdown("**מקור הקטגוריה:**")
-                st.dataframe(cat_src, hide_index=True,
-                             column_config={
-                                 "מקור":  st.column_config.TextColumn("מקור",  width=220),
-                                 "שורות": st.column_config.NumberColumn("שורות", width=80),
-                             })
-            if "אחריות_מקור" in df.columns:
-                with col_c2:
-                    resp_src = df["אחריות_מקור"].value_counts().reset_index()
-                    resp_src.columns = ["מקור", "שורות"]
-                    st.markdown("**מקור האחריות:**")
-                    st.dataframe(resp_src, hide_index=True,
-                                 column_config={
-                                     "מקור":  st.column_config.TextColumn("מקור",  width=220),
-                                     "שורות": st.column_config.NumberColumn("שורות", width=80),
-                                 })
+    # ════════════════════════════════════════════════════════
+    #  TIER B — Spot-check (MEDIUM confidence)
+    # ════════════════════════════════════════════════════════
+    if n_medium > 0:
+        _med_approved_key = "_medium_approved"
+        if _med_approved_key not in st.session_state:
+            st.session_state[_med_approved_key] = False
 
-        # 3. Street corrections applied
-        from corrections import STREET_CORRECTIONS as _SC
-        if "רחוב_ראשי" in df.columns:
-            _corrected = df[df.get("תוקן_אוטומטית", pd.Series(False, index=df.index))]
-            n_street_fix = int(df.get("תוקן_אוטומטית", pd.Series(False, index=df.index)).sum()) \
-                if "תוקן_אוטומטית" in df.columns else 0
-            if n_street_fix:
-                st.markdown(f"**תיקוני רחוב אוטומטיים:** {n_street_fix:,} שורות תוקנו")
-                _fix_sample = df[df["תוקן_אוטומטית"] == True][
-                    [c for c in ["מס' פניה", "רחוב_ראשי", "מסלול_כתובת"] if c in df.columns]
-                ].head(10)
-                st.dataframe(_fix_sample, hide_index=True,
-                             column_config={c: st.column_config.TextColumn(c, width=140)
-                                            for c in _fix_sample.columns})
-            else:
-                st.caption("לא בוצעו תיקוני רחוב אוטומטיים.")
+        _med_label = "✅ אושרו — כל השורות ההסתברותיות" if st.session_state[_med_approved_key] \
+            else f"🟡 בדיקת מדגם — {n_medium:,} שורות הסתברותיות"
+        with st.expander(_med_label, expanded=(not st.session_state[_med_approved_key])):
+            st.markdown(
+                '<div style="color:#92400e;background:#fef3c7;border-radius:8px;'
+                'padding:.7rem 1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
+                '⚡ שורות אלו עובדו בכלל היוריסטי — מיפוי נגזר מנושא, אחריות שהוסקה ממילות '
+                'מפתח, או כתובת שפורסה עם פרשנות (סיומת דירה, ציון דרך). '
+                'רוב הזמן הן נכונות, אבל כדאי לסרוק מדגם.</div>',
+                unsafe_allow_html=True,
+            )
+            if "_confidence" in df.columns:
+                _med_df = df[df["_confidence"] == "medium"].copy()
+                # Show a representative sample (up to 20 rows)
+                import random as _random
+                _SAMPLE_N = min(20, len(_med_df))
+                _sample_idx = _med_df.index.tolist()
+                if len(_sample_idx) > _SAMPLE_N:
+                    _rng = _random.Random(42)  # deterministic seed for reproducibility
+                    _sample_idx = _rng.sample(_sample_idx, _SAMPLE_N)
+                _med_sample = _med_df.loc[_sample_idx]
 
-        # 4. Auto-fix audit log entries
-        _audit_entries = al.load_log()
-        _autofix = [e for e in _audit_entries if e.get("source") == "auto_fix"]
-        if _autofix:
-            st.markdown(f"**תיקוני auto_fix ({len(_autofix):,} שינויים):**")
-            _af_df = pd.DataFrame(_autofix)[["ticket", "field", "old", "new"]].head(30)
-            _af_df.columns = ["פנייה", "שדה", "לפני", "אחרי"]
-            st.dataframe(_af_df, hide_index=True,
-                         column_config={c: st.column_config.TextColumn(c, width=130)
-                                        for c in _af_df.columns})
-        else:
-            st.caption("יומן auto_fix ריק — לא בוצעו שינויים אוטומטיים בסשן הנוכחי.")
+                st.caption(f"מציג {len(_sample_idx)} שורות מתוך {n_medium:,} (מדגם אקראי):")
 
-    # ── Flag breakdown ──────────────────────────────────────────────────────
-    col_bd1, col_bd2 = st.columns(2)
-    with col_bd1:
-        if n_block > 0:
-            breakdown_b = _flag_breakdown(flagged, "block")
-            st.markdown("**🔴 פירוט בעיות חוסמות:**")
-            st.dataframe(breakdown_b, hide_index=True,
-                         column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
-                                        "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
-    with col_bd2:
-        if n_warn > 0:
-            breakdown_w = _flag_breakdown(flagged, "warn")
-            st.markdown("**🟡 פירוט אזהרות:**")
-            st.dataframe(breakdown_w, hide_index=True,
-                         column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
-                                        "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
+                # Per-row decision trail
+                for _si, (_ix, _row) in enumerate(
+                    _med_sample[[c for c in
+                        ["מס' פניה", "כתובת ואתר/מוסד", "רחוב_ראשי", "מספר_בית",
+                         "תת_נושא_חדש", "אחריות", "_confidence_details"]
+                        if c in _med_sample.columns]].iterrows()
+                ):
+                    _tid  = str(_row.get("מס' פניה", ""))
+                    _raw  = str(_row.get("כתובת ואתר/מוסד", ""))[:60]
+                    _cat  = str(_row.get("תת_נושא_חדש", ""))
+                    _resp = str(_row.get("אחריות", ""))
+                    _st   = str(_row.get("רחוב_ראשי", ""))
+                    _det  = str(_row.get("_confidence_details", ""))
+                    with st.expander(f"פניה {_tid} — {_raw}", expanded=False):
+                        st.markdown(
+                            f'<div style="direction:rtl;">'
+                            f'<b>קטגוריה:</b> {_cat} &nbsp;|&nbsp; '
+                            f'<b>אחריות:</b> {_resp} &nbsp;|&nbsp; '
+                            f'<b>רחוב:</b> {_st}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(_render_conf_details(_det), unsafe_allow_html=True)
 
-    # ── Triage groups ───────────────────────────────────────────────────────
+            st.markdown("---")
+            _mc1, _mc2 = st.columns(2)
+            with _mc1:
+                if st.button("✅ אשר את כל השורות ההסתברותיות", type="primary",
+                             use_container_width=True, key="approve_medium"):
+                    st.session_state[_med_approved_key] = True
+                    al.log_correction("batch", "_confidence_medium", "pending", "approved", "spot_check_approval")
+                    st.rerun()
+            with _mc2:
+                st.caption("לחץ אחרי שסקרת את המדגם ואתה מרוצה מהסיווג האוטומטי.")
+    else:
+        st.info("אין שורות הסתברותיות — כל הסיווגים הם דטרמיניסטיים.")
+
+    # ════════════════════════════════════════════════════════
+    #  TIER C — Manual review (LOW confidence)
+    # ════════════════════════════════════════════════════════
+    if n_low > 0:
+        _low_decisions_key = "_low_decisions"
+        if _low_decisions_key not in st.session_state:
+            st.session_state[_low_decisions_key] = {}
+        _decisions = st.session_state[_low_decisions_key]
+        _n_decided = sum(1 for v in _decisions.values() if v in ("approved", "flagged"))
+        _n_flagged = sum(1 for v in _decisions.values() if v == "flagged")
+
+        with st.expander(
+            f"🔴 סקירה ידנית — {n_low:,} שורות · {_n_decided}/{n_low} טופלו · {_n_flagged} סומנו לתיקון",
+            expanded=True,
+        ):
+            st.markdown(
+                '<div style="color:#991b1b;background:#fee2e2;border-radius:8px;'
+                'padding:.7rem 1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
+                '⚠️ שורות אלו לא הצליחו לעבור סיווג אוטומטי בוודאות — '
+                'תת-נושא לא מזוהה, אחריות לא נפתרת, או כתובת ריקה/תיאורית. '
+                'לכל שורה — בחרו: אשר כפי שהוא, או סמן לתיקון ב-Excel.</div>',
+                unsafe_allow_html=True,
+            )
+
+            if "_confidence" in df.columns:
+                _low_df = df[df["_confidence"] == "low"].copy()
+                # Show up to 50 rows — beyond that, Excel export is the right tool
+                _MAX_SHOW = 50
+                _low_show = _low_df.head(_MAX_SHOW)
+                if len(_low_df) > _MAX_SHOW:
+                    st.caption(f"מציג {_MAX_SHOW} שורות ראשונות מתוך {n_low:,} — השתמשו בקובץ הורדה לסקירה מלאה.")
+
+                for _ix, _row in _low_show[[c for c in
+                    ["מס' פניה", "כתובת ואתר/מוסד", "רחוב_ראשי", "מספר_בית",
+                     "תת_נושא_חדש", "אחריות", "תיאור", "_confidence_details"]
+                    if c in _low_show.columns]].iterrows():
+                    _tid  = str(_row.get("מס' פניה", str(_ix)))
+                    _raw  = str(_row.get("כתובת ואתר/מוסד", ""))[:70]
+                    _cat  = str(_row.get("תת_נושא_חדש", ""))
+                    _resp = str(_row.get("אחריות", ""))
+                    _desc = str(_row.get("תיאור",  ""))[:80]
+                    _det  = str(_row.get("_confidence_details", ""))
+                    _cur  = _decisions.get(_tid, "")
+                    _icon = "✅" if _cur == "approved" else ("🔴" if _cur == "flagged" else "⬜")
+
+                    with st.expander(f"{_icon} פניה {_tid} — {_raw}", expanded=(_cur == "")):
+                        _dc1, _dc2 = st.columns([3, 1])
+                        with _dc1:
+                            st.markdown(
+                                f'<div style="direction:rtl;font-size:.87rem;">'
+                                f'<b>קטגוריה:</b> {_cat} &nbsp;|&nbsp; '
+                                f'<b>אחריות:</b> {_resp}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(_render_conf_details(_det), unsafe_allow_html=True)
+                            if _desc:
+                                st.caption(f"תיאור: {_desc}")
+                        with _dc2:
+                            if st.button("✅ אשר", key=f"low_ok_{_tid}", use_container_width=True):
+                                _decisions[_tid] = "approved"
+                                st.session_state[_low_decisions_key] = _decisions
+                                al.log_correction(_tid, "_confidence_low", "pending", "approved", "manual_review")
+                                st.rerun()
+                            if st.button("🔴 סמן לתיקון", key=f"low_flag_{_tid}", use_container_width=True):
+                                _decisions[_tid] = "flagged"
+                                st.session_state[_low_decisions_key] = _decisions
+                                al.log_correction(_tid, "_confidence_low", "pending", "flagged", "manual_review")
+                                st.rerun()
+
+            # Summary of decisions
+            if _n_decided > 0:
+                st.markdown(
+                    f'<div class="banner-{"warn" if _n_flagged else "success"}">'
+                    f'{"⚠️" if _n_flagged else "✅"} '
+                    f'{_n_decided} שורות טופלו — '
+                    f'{_n_decided - _n_flagged} אושרו, {_n_flagged} סומנו לתיקון.</div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        with st.expander("✅ אין שורות ברמת ביטחון נמוכה", expanded=False):
+            st.success("כל השורות עובדו בכלל ברמת ביטחון בינונית או גבוהה.")
+
+    # ════════════════════════════════════════════════════════
+    #  TIER D — Structural integrity flags (existing logic)
+    # ════════════════════════════════════════════════════════
     _triage = fl.build_triage_groups(flagged)
     _tsumm  = fl.triage_summary(_triage)
-    _display_cols = [c for c in ["מס' פניה", "רחוב_ראשי", "מספר_בית", "סוג_מיקום",
-                                  "_flag_labels"] if c in flagged.columns]
-    if _tsumm["blocking"] > 0:
-        with st.expander(f"🔴 חוסמות ({_tsumm['blocking']:,})", expanded=True):
-            _render_flagged_table(_triage["blocking"])
-    if _tsumm["review"] > 0:
-        with st.expander(f"🟡 לסקירה ({_tsumm['review']:,})", expanded=False):
-            _render_flagged_table(_triage["review"])
 
-    # ── Download-first review Excel ─────────────────────────────────────────
-    st.markdown('<div class="step-card"><h4>קובץ לבדיקה ידנית</h4>'
-                '<p>הורידו את הקובץ לעיון ותיקון ב-Excel. '
-                'כל שורה מסומנת בעמודות בוליאניות (<strong>דורש_תיקון</strong> / <strong>אזהרה_בלבד</strong>) '
-                'ובצבע שורה (אדום / צהוב). '
-                'לאחר תיקון ידני של השורות החוסמות בקובץ המקורי, העלו מחדש.</p></div>',
-                unsafe_allow_html=True)
+    if _tsumm["blocking"] > 0 or _tsumm["review"] > 0:
+        st.markdown("---")
+        st.markdown("#### ⛔ בעיות מבניות בנתונים")
 
-    # Build review Excel with boolean columns + row coloring
+        col_bd1, col_bd2 = st.columns(2)
+        with col_bd1:
+            if n_block > 0:
+                st.markdown("**🔴 פירוט בעיות חוסמות:**")
+                st.dataframe(_flag_breakdown(flagged, "block"), hide_index=True,
+                             column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
+                                            "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
+        with col_bd2:
+            if n_warn > 0:
+                st.markdown("**🟡 פירוט אזהרות:**")
+                st.dataframe(_flag_breakdown(flagged, "warn"), hide_index=True,
+                             column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
+                                            "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
+
+        if _tsumm["blocking"] > 0:
+            with st.expander(f"🔴 חוסמות ({_tsumm['blocking']:,})", expanded=True):
+                _render_flagged_table(_triage["blocking"])
+        if _tsumm["review"] > 0:
+            with st.expander(f"🟡 לסקירה ({_tsumm['review']:,})", expanded=False):
+                _render_flagged_table(_triage["review"])
+
+    # ── Download review Excel ───────────────────────────────────────────────
+    st.markdown("---")
+
     def _review_excel(df: pd.DataFrame, flagged: pd.DataFrame) -> bytes:
         export = df.copy()
-        severity   = flagged["_flag_severity"].tolist()
+        severity    = flagged["_flag_severity"].tolist()
         flag_labels = flagged["_flag_labels"].tolist()
+        conf_col    = export.get("_confidence", pd.Series([""] * len(export))).tolist() \
+                      if "_confidence" in export.columns else [""] * len(export)
+        det_col     = export.get("_confidence_details", pd.Series([""] * len(export))).tolist() \
+                      if "_confidence_details" in export.columns else [""] * len(export)
 
-        # Boolean flag columns — added FIRST so they're visible immediately
-        export.insert(0, "אזהרה_בלבד",   [s == "warn"  for s in severity])
-        export.insert(0, "דורש_תיקון",   [s == "block" for s in severity])
-        export.insert(0, "תיאור_בעיה",   flag_labels)
-
-        # Drop internal cols
+        # Insert review columns up front
+        export.insert(0, "פירוט_החלטה",    det_col)
+        export.insert(0, "רמת_ביטחון",     conf_col)
+        export.insert(0, "אזהרה_בלבד",     [s == "warn"  for s in severity])
+        export.insert(0, "דורש_תיקון",     [s == "block" for s in severity])
+        export.insert(0, "תיאור_בעיה",     flag_labels)
         export = export.drop(columns=[c for c in export.columns if c.startswith("_")],
                              errors="ignore")
 
+        _conf_bg = {"high": "#dcfce7", "medium": "#fef9c3", "low": "#fee2e2", "": "#ffffff"}
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
             wb = writer.book
-            fmt_hdr   = wb.add_format({"bold": True, "bg_color": "#1a3a5c",
-                                       "font_color": "white", "align": "right",
-                                       "border": 1})
-            fmt_block = wb.add_format({"bg_color": "#fecaca", "border": 1})  # red-200
-            fmt_warn  = wb.add_format({"bg_color": "#fef08a", "border": 1})  # yellow-200
-            fmt_ok    = wb.add_format({"bg_color": "#ffffff", "border": 1})
-            fmt_bool_t = wb.add_format({"bg_color": "#fecaca", "bold": True,
-                                        "align": "center", "border": 1})
-            fmt_bool_f = wb.add_format({"bg_color": "#dcfce7", "bold": True,
-                                        "align": "center", "border": 1})
+            fmt_hdr    = wb.add_format({"bold": True, "bg_color": "#1a3a5c",
+                                        "font_color": "white", "align": "right", "border": 1})
+            fmt_block  = wb.add_format({"bg_color": "#fecaca", "border": 1})
+            fmt_warn   = wb.add_format({"bg_color": "#fef08a", "border": 1})
+            fmt_ok     = wb.add_format({"bg_color": "#ffffff", "border": 1})
+            fmt_hi     = wb.add_format({"bg_color": "#dcfce7", "border": 1})
+            fmt_med    = wb.add_format({"bg_color": "#fef9c3", "border": 1})
+            fmt_lo     = wb.add_format({"bg_color": "#fecaca", "bold": True, "border": 1})
 
-            # ── Sheet 1: All data with flags ──────────────────────────────
+            # Sheet 1 — full dataset, row colored by flag severity
             export.to_excel(writer, index=False, sheet_name="כל הנתונים")
             ws = writer.sheets["כל הנתונים"]
-            ncols = len(export.columns)
-
-            # Header row
             for j, col in enumerate(export.columns):
                 ws.write(0, j, col, fmt_hdr)
-
-            # Row coloring + boolean cell formatting
             for i, sev in enumerate(severity):
                 row_fmt = fmt_block if sev == "block" else (fmt_warn if sev == "warn" else fmt_ok)
                 ws.set_row(i + 1, None, row_fmt)
-                # Color the boolean columns explicitly
-                ws.write(i + 1, 0, flag_labels[i])           # תיאור_בעיה
-                ws.write(i + 1, 1, sev == "block",           # דורש_תיקון
-                         fmt_bool_t if sev == "block" else fmt_bool_f)
-                ws.write(i + 1, 2, sev == "warn",            # אזהרה_בלבד
-                         fmt_bool_t if sev == "warn" else fmt_bool_f)
-
-            # Column widths
-            ws.set_column(0, 0, 40)   # תיאור_בעיה
-            ws.set_column(1, 2, 14)   # boolean cols
-            ws.set_column(3, ncols, 18)
+            ws.set_column(0, 0, 40); ws.set_column(1, 4, 14); ws.set_column(5, len(export.columns), 18)
             ws.freeze_panes(1, 0)
 
-            # ── Sheet 2: Blocking rows only ───────────────────────────────
-            block_rows = export[[s == "block" for s in severity]]
-            block_sev  = [s for s in severity if s == "block"]
-            if not block_rows.empty:
-                block_rows.to_excel(writer, index=False, sheet_name="דורשות תיקון")
-                ws2 = writer.sheets["דורשות תיקון"]
-                for j, col in enumerate(block_rows.columns):
+            # Sheet 2 — low-confidence rows only (manual review list)
+            _low_mask = [c == "low" for c in conf_col]
+            _low_export = export[[m for m in _low_mask]]
+            if any(_low_mask):
+                _low_rows = export.iloc[[i for i, m in enumerate(_low_mask) if m]]
+                _low_rows.to_excel(writer, index=False, sheet_name="לסקירה ידנית")
+                ws2 = writer.sheets["לסקירה ידנית"]
+                for j, col in enumerate(_low_rows.columns):
                     ws2.write(0, j, col, fmt_hdr)
-                for i in range(len(block_rows)):
-                    ws2.set_row(i + 1, None, fmt_block)
-                ws2.set_column(0, 0, 40)
-                ws2.set_column(1, 2, 14)
-                ws2.set_column(3, len(block_rows.columns), 18)
+                for i in range(len(_low_rows)):
+                    ws2.set_row(i + 1, None, fmt_lo)
+                ws2.set_column(0, 0, 40); ws2.set_column(5, len(_low_rows.columns), 18)
                 ws2.freeze_panes(1, 0)
 
-            # ── Sheet 3: Summary ──────────────────────────────────────────
-            summary_rows = [
-                ("סה״כ שורות",           len(df)),
-                ("שורות תקינות",          n_clean),
-                ("דורשות תיקון (חוסמות)", n_block),
-                ("אזהרות בלבד",           n_warn),
-            ]
-            pd.DataFrame(summary_rows, columns=["מדד", "ערך"]).to_excel(
-                writer, index=False, sheet_name="סיכום")
-            ws3 = writer.sheets["סיכום"]
-            ws3.set_column("A:A", 30)
-            ws3.set_column("B:B", 14)
+            # Sheet 3 — blocking structural issues
+            _bl_rows = export.iloc[[i for i, s in enumerate(severity) if s == "block"]]
+            if not _bl_rows.empty:
+                _bl_rows.to_excel(writer, index=False, sheet_name="דורשות תיקון")
+                ws3 = writer.sheets["דורשות תיקון"]
+                for j, col in enumerate(_bl_rows.columns):
+                    ws3.write(0, j, col, fmt_hdr)
+                for i in range(len(_bl_rows)):
+                    ws3.set_row(i + 1, None, fmt_block)
+                ws3.set_column(0, 0, 40); ws3.set_column(5, len(_bl_rows.columns), 18)
+                ws3.freeze_panes(1, 0)
+
+            # Sheet 4 — summary
+            _low_cnt  = sum(_low_mask)
+            _med_cnt  = sum(c == "medium" for c in conf_col)
+            _hi_cnt   = sum(c == "high"   for c in conf_col)
+            _flagged_decisions = sum(
+                1 for tid, v in st.session_state.get("_low_decisions", {}).items()
+                if v == "flagged"
+            )
+            pd.DataFrame([
+                ("סה״כ שורות",              len(export)),
+                ("אוטומטי בטוח (high)",      _hi_cnt),
+                ("הסתברותי (medium)",         _med_cnt),
+                ("לסקירה ידנית (low)",        _low_cnt),
+                ("סומנו לתיקון ידני",         _flagged_decisions),
+                ("בעיות מבניות חוסמות",       n_block),
+                ("אזהרות מבניות",             n_warn),
+            ], columns=["מדד", "ערך"]).to_excel(writer, index=False, sheet_name="סיכום")
+            ws4 = writer.sheets["סיכום"]
+            ws4.set_column("A:A", 30); ws4.set_column("B:B", 14)
             for j, h in enumerate(["מדד", "ערך"]):
-                ws3.write(0, j, h, fmt_hdr)
+                ws4.write(0, j, h, fmt_hdr)
 
         return buf.getvalue()
 
-    review_bytes = _review_excel(df, flagged)
+    _n_flagged_for_download = sum(
+        1 for v in st.session_state.get("_low_decisions", {}).values() if v == "flagged"
+    )
     base = st.session_state.filename.replace(".xlsx", "")
+    _dl_label = (
+        f"📥 הורד קובץ סקירה — {len(df):,} שורות | "
+        f"{n_high:,} אוטומטי | {n_medium:,} מדגם | {n_low:,} ידני | "
+        f"{_n_flagged_for_download} סומנו לתיקון"
+    )
     st.download_button(
-        label=f"📥 הורד קובץ לבדיקה ({len(df):,} שורות | {n_block:,} חוסמות | {n_warn:,} אזהרות)",
-        data=review_bytes,
+        label=_dl_label,
+        data=_review_excel(df, flagged),
         file_name=f"{base}_לבדיקה.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
-    st.divider()
 
     # ── Re-upload corrected file ────────────────────────────────────────────
     with st.expander("📤 העלה קובץ מתוקן לבדיקה חוזרת", expanded=(n_block > 0)):
@@ -883,21 +1048,28 @@ elif stage == "clean":
         if reupload:
             try:
                 df_fixed = pd.read_excel(reupload)
-                # Drop any review columns if worker accidentally re-uploaded the review file
-                df_fixed = df_fixed.drop(columns=['תיאור_בעיה','דורש_תיקון','אזהרה_בלבד'],
-                                          errors='ignore')
+                df_fixed = df_fixed.drop(
+                    columns=["תיאור_בעיה", "דורש_תיקון", "אזהרה_בלבד",
+                             "רמת_ביטחון", "פירוט_החלטה"], errors="ignore")
                 with st.spinner("מנקה ובודק שוב..."):
                     df_fixed = run_clean_in_memory(df_fixed)
                     df_fixed = auto_fix(df_fixed)
                 flagged_new = fl.detect_flags(df_fixed, DATE_MIN, DATE_MAX, stage="clean")
                 nb_new = fl.count_blocking(flagged_new)
                 nw_new = fl.count_warnings(flagged_new)
-                st.markdown(f'<div class="banner-success">✅ קובץ מתוקן נטען: '
-                            f'<strong>{nb_new}</strong> חוסמות, <strong>{nw_new}</strong> אזהרות</div>',
-                            unsafe_allow_html=True)
+                _cs_new = st.session_state.get("_clean_stats", {})
+                nl_new  = _cs_new.get("conf_low", 0)
+                st.markdown(
+                    f'<div class="banner-success">✅ קובץ מתוקן נטען: '
+                    f'<strong>{nb_new}</strong> חוסמות · <strong>{nw_new}</strong> אזהרות · '
+                    f'<strong>{nl_new}</strong> נמוכי ביטחון</div>',
+                    unsafe_allow_html=True,
+                )
                 if st.button("✅ אמץ קובץ מתוקן זה", type="primary", use_container_width=True):
                     st.session_state.df = df_fixed
                     st.session_state.filename = reupload.name
+                    st.session_state.pop("_low_decisions", None)
+                    st.session_state.pop("_medium_approved", None)
                     st.rerun()
             except Exception as e:
                 st.markdown(f'<div class="banner-error">❌ שגיאה: {e}</div>',
@@ -907,8 +1079,25 @@ elif stage == "clean":
         st.markdown(
             f'<div class="banner-warn">⚠️ נותרו <strong>{n_block:,}</strong> שורות חוסמות. '
             f'הורידו את קובץ הבדיקה, תקנו את הגיליון <strong>"דורשות תיקון"</strong> '
-            f'בקובץ המקורי, והעלו מחדש למעלה. '
+            f'בקובץ המקורי, והעלו מחדש. '
             f'לחלופין — לחצו "החרג ועבור הלאה" אם הבעיות ידועות ואינן מונעות גאוקוד.</div>',
+            unsafe_allow_html=True)
+
+    # ── Navigation CTAs ─────────────────────────────────────────────────────
+    st.markdown("---")
+    _ready = (n_block == 0)
+    _med_ok = (n_medium == 0 or st.session_state.get("_medium_approved", False))
+    _low_ok = (n_low == 0 or
+               sum(1 for v in st.session_state.get("_low_decisions", {}).values()
+                   if v in ("approved", "flagged")) == min(n_low, 50))
+
+    if not _ready:
+        st.markdown(
+            '<div class="banner-warn">⛔ יש שורות חוסמות — יש לטפל בהן לפני המשך לגאוקוד.</div>',
+            unsafe_allow_html=True)
+    elif not _med_ok:
+        st.markdown(
+            '<div class="banner-warn">🟡 טרם אושרו השורות ההסתברותיות — אשר מדגם או לחץ "אשר הכל" למעלה.</div>',
             unsafe_allow_html=True)
 
     cta1, cta2, cta3 = st.columns([1, 1, 1])
@@ -917,11 +1106,13 @@ elif stage == "clean":
             st.session_state.df = None
             goto("upload")
     with cta2:
-        if n_block == 0:
+        _can_proceed = _ready and _med_ok
+        if _can_proceed:
             if st.button("▶ המשך לגאוקוד", type="primary", use_container_width=True):
                 goto("geocode")
         else:
-            st.button(f"▶ המשך לגאוקוד ✓", type="primary",
+            _why = "חוסמות קיימות" if not _ready else "אשר מדגם הסתברותי"
+            st.button(f"▶ המשך לגאוקוד ({_why})", type="primary",
                       disabled=True, use_container_width=True)
     with cta3:
         if n_block > 0:
