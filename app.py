@@ -109,6 +109,22 @@ h1,h2,h3,p,div,span,label { direction:rtl; text-align:right; }
 }
 /* Streamlit new dataframe (glide-data-grid) canvas fallback: ensure wrapper scrolls */
 .stDataFrame > div { overflow-x: auto !important; }
+
+/* ── Hover tooltips ── */
+.tip-wrap { display:inline-block; position:relative; cursor:help; }
+.tip-icon { color:#6366f1; font-size:.9rem; vertical-align:middle; }
+.tip-box {
+  display:none; position:absolute;
+  right:0; top:1.5rem;
+  background:#1e293b; color:#f8fafc;
+  border-radius:10px; padding:.65rem 1rem;
+  font-size:.78rem; line-height:1.65;
+  width:290px; z-index:9999;
+  direction:rtl; text-align:right;
+  box-shadow:0 6px 20px rgba(0,0,0,.35);
+  white-space:normal; pointer-events:none;
+}
+.tip-wrap:hover .tip-box { display:block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -466,6 +482,81 @@ def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
     return buf.getvalue()
 
 
+def _tip(html_content: str) -> str:
+    """Render a hover-tooltip '?' icon. html_content is the inner HTML of the bubble."""
+    return (
+        f'<span class="tip-wrap">'
+        f'<span class="tip-icon">❓</span>'
+        f'<div class="tip-box">{html_content}</div>'
+        f'</span>'
+    )
+
+
+def _find_street_variants(df: pd.DataFrame) -> list:
+    """
+    Find street names in the data that have variant spellings or differ from the
+    canonical form in the municipal street registry (imported from geocode_pipeline).
+
+    Returns list of:
+      {"canonical": str, "total": int, "variants": [{"raw": str, "count": int}],
+       "registry_match": str|None}
+    sorted by total occurrences descending, capped at 15 groups.
+    """
+    try:
+        import re as _re
+        from collections import defaultdict as _dd
+        import geocode_pipeline as _gp
+
+        _prefix = _re.compile(r"^(רחוב|רח[׳']|ר[׳']|ה?רחוב)\s+", _re.UNICODE)
+        _suffix = _re.compile(r"\s*([,\.;]|\d{1,5}|ת\.א|ת\.ל)\s*$", _re.UNICODE)
+
+        def _norm(s: str) -> str:
+            s = str(s).strip()
+            s = _prefix.sub("", s)
+            s = _suffix.sub("", s)
+            return s.strip()
+
+        streets = df["רחוב_ראשי"].dropna().astype(str) if "רחוב_ראשי" in df.columns else pd.Series(dtype=str)
+        streets = streets[streets.str.strip() != ""]
+
+        raw_counts: dict = {}
+        for raw in streets:
+            raw_counts[raw] = raw_counts.get(raw, 0) + 1
+
+        # Group raw → normalized
+        norm_groups: dict = _dd(lambda: _dd(int))
+        for raw, cnt in raw_counts.items():
+            norm_groups[_norm(raw)][raw] += cnt
+
+        results = []
+        for norm_key, raw_cnt_map in norm_groups.items():
+            total = sum(raw_cnt_map.values())
+            if total < 5:
+                continue
+            # Only show groups with >1 distinct spelling OR whose canonical differs from raw
+            all_raws = sorted(raw_cnt_map, key=lambda k: -raw_cnt_map[k])
+            canonical = all_raws[0]  # most common raw form
+            variants = [{"raw": r, "count": raw_cnt_map[r]} for r in all_raws[1:] if raw_cnt_map[r] >= 2]
+
+            # Check registry
+            reg_canon, _ = _gp._registry_resolve(norm_key)
+            if reg_canon is None and len(all_raws) > 1:
+                reg_canon, _ = _gp._registry_resolve(canonical)
+
+            if variants or (reg_canon and reg_canon != canonical):
+                results.append({
+                    "canonical": canonical,
+                    "normalized": norm_key,
+                    "total": total,
+                    "variants": variants,
+                    "registry_match": reg_canon,
+                })
+
+        return sorted(results, key=lambda x: -x["total"])[:15]
+    except Exception:
+        return []
+
+
 def _center_style(df: pd.DataFrame):
     """Return a pandas Styler with centered, RTL cells — works in both HTML and canvas modes."""
     return (df.style
@@ -709,70 +800,187 @@ elif stage == "clean":
     # ════════════════════════════════════════════════════════
     #  CLUSTER Q&A — resolve uncertain rows before export
     # ════════════════════════════════════════════════════════
-    _clusters = cp.find_clusters(df)
-    _has_questions = bool(_clusters["unknown_subtopics"] or _clusters["unresolved_resp"])
+    _clusters  = cp.find_clusters(df)
+    _st_vars   = _find_street_variants(df)
+    _has_questions = bool(_clusters["unknown_subtopics"] or _clusters["unresolved_resp"] or _st_vars)
+
+    # Tooltip HTML for common reference points
+    _TIP_RESP = _tip(
+        "<strong>כשל עירוני</strong> — העירייה לא ביצעה את עבודתה: "
+        "פינוי לא תקין, ניקוי שלא נעשה, ציוד שהתקלקל, עובדי ניקוי שלא הגיעו<br><br>"
+        "<strong>התנהגות אזרח</strong> — אזרח גרם לבעיה: "
+        "זרק אשפה, פיזר פסולת, גנב ציוד, גרם נזק<br><br>"
+        "<strong>טבעי</strong> — הטבע הוא הגורם: "
+        "גשם, רוח, עלים נשרו, ציפורים, בעלי חיים<br><br>"
+        "<strong>לא רלוונטי</strong> — האחריות לא שייכת לביצועים: "
+        "בקשות שירות, תביעות נזק"
+    )
+    _TIP_CAT = _tip(
+        "<strong>אי פינוי</strong> — אשפה לא פונתה במועד הקבוע<br>"
+        "<strong>תלונה על ביצוע הפינוי</strong> — הפינוי בוצע אך בצורה לא תקינה<br>"
+        "<strong>משטח מלוכלך</strong> — רחוב, מדרכה, מגרש מלוכלכים<br>"
+        "<strong>פסולת לא מורשית</strong> — ערמת זבל שהושלכה לא כחוק<br>"
+        "<strong>כלי אצירה פגומים</strong> — פח/מכולה שבורים<br>"
+        "<strong>כלי אצירה מלא</strong> — פח/מכולה מלאים מדי<br>"
+        "<strong>פח נעלם</strong> — פח שנעלם לאחר פינוי<br>"
+        "<strong>צואת כלבים</strong> — בעיה ספציפית של צואת כלבים<br>"
+        "<strong>פגר</strong> — פגר בעל חיים ברחוב<br>"
+        "<strong>פלישת צומח</strong> — עשבים שצמחו על מדרכה"
+    )
+    _TIP_STREET = _tip(
+        "שם הרחוב הקנוני הוא השם הרשמי שמופיע ב-GIS העירוני של הרצליה.<br><br>"
+        "כשיש כתיבות שונות לאותו רחוב, הגאוקוד עלול להיכשל על חלקן.<br><br>"
+        "האחדה לשם אחד משפרת את הדיוק של מציאת הקואורדינטות."
+    )
 
     if _has_questions:
         st.markdown("---")
-        _total_q_rows = (sum(c["count"] for c in _clusters["unknown_subtopics"]) +
-                         sum(c["count"] for c in _clusters["unresolved_resp"]))
+        _total_q_rows = (
+            sum(c["count"] for c in _clusters["unknown_subtopics"]) +
+            sum(c["count"] for c in _clusters["unresolved_resp"]) +
+            sum(v["total"] for v in _st_vars)
+        )
         st.markdown(
             f'<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;'
             f'padding:.8rem 1.1rem;font-size:.9rem;direction:rtl;margin-bottom:1rem;">'
             f'🙋 <strong>נדרש קלט ממך</strong> — מצאנו {_total_q_rows:,} פניות שלא ניתן '
-            f'לסווג בלי המידע שלך. ענה על השאלות הבאות כדי שהמערכת תסווג אותן אוטומטית.'
+            f'לסווג בלי המידע שלך. ענה על השאלות הבאות כדי שהמערכת תסווג אותן אוטומטית. '
+            f'לכל שאלה יש כפתור ❓ עם הסבר — רחף מעליו לפני שאתה עונה.'
             f'</div>',
             unsafe_allow_html=True,
         )
 
         _qa_answers: dict = {}
 
+        # ── Type 1: Unknown sub-topics ────────────────────────────────────
         if _clusters["unknown_subtopics"]:
-            st.markdown("**📋 תתי-נושא שלא מוכרים למערכת:**")
+            st.markdown(
+                f'**📋 תת-נושאים שלא מוכרים למערכת** {_TIP_CAT}',
+                unsafe_allow_html=True,
+            )
             for _cl in _clusters["unknown_subtopics"]:
                 _sub = _cl["value"]
                 _cnt = _cl["count"]
-                _examples_text = " • ".join(_cl.get("examples", [])[:2])
+                _ex  = " • ".join(_cl.get("examples", [])[:2])
                 st.markdown(
                     f'<div style="background:#fff7ed;border-right:3px solid #fb923c;'
-                    f'padding:.5rem .8rem;border-radius:4px;direction:rtl;margin:.5rem 0;">'
+                    f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
                     f'<strong>"{_sub}"</strong> — {_cnt:,} פניות'
-                    f'{f"<br><small style=color:#78716c>{_examples_text}</small>" if _examples_text else ""}'
+                    f'{f"<br><small style=color:#78716c;font-size:.8rem>{_ex}</small>" if _ex else ""}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
                 _opts = ["השאר לבדיקה ב-Excel"] + cp.KNOWN_CATEGORIES_LIST
                 _ans = st.selectbox(
-                    f'לאיזו קטגוריה שייכות הפניות עם תת-נושא "{_sub}"?',
+                    f'לאיזו קטגוריה שייכות פניות "{_sub}"?',
                     _opts, key=f"qa_sub_{_sub}",
+                    help="בחר את הקטגוריה המתאימה. רחף מעל ❓ למעלה לראות הגדרות הקטגוריות.",
                 )
                 if _ans != "השאר לבדיקה ב-Excel":
                     _qa_answers[f"subtopic:{_sub}"] = _ans
 
+        # ── Type 2: Unresolved responsibility (with description samples) ──
         if _clusters["unresolved_resp"]:
-            st.markdown("**📋 קטגוריות שלא ברור מי אחראי לטיפול בהן:**")
+            st.markdown(
+                f'**📋 קטגוריות שלא ברור מי אחראי לטיפול** {_TIP_RESP}',
+                unsafe_allow_html=True,
+            )
             for _cl in _clusters["unresolved_resp"]:
-                _cat = _cl["category"]
-                _cnt = _cl["count"]
+                _cat  = _cl["category"]
+                _cnt  = _cl["count"]
+                _smpl = _cl.get("desc_samples", [])
+                _samples_html = ""
+                if _smpl:
+                    _samples_html = (
+                        '<br><small style="color:#78716c;font-size:.79rem;">'
+                        '<em>דוגמאות מהתיאורים (כדי שתוכל לשפוט):</em><br>'
+                        + "<br>".join(f"• {s}" for s in _smpl)
+                        + "</small>"
+                    )
                 st.markdown(
                     f'<div style="background:#fff7ed;border-right:3px solid #fb923c;'
-                    f'padding:.5rem .8rem;border-radius:4px;direction:rtl;margin:.5rem 0;">'
-                    f'<strong>"{_cat}"</strong> — {_cnt:,} פניות — לא ידוע מי אחראי'
+                    f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
+                    f'<strong>"{_cat}"</strong> — {_cnt:,} פניות ללא סיווג אחריות'
+                    f'{_samples_html}'
+                    f'<br><small style="color:#9a3412;font-size:.78rem;">⚠️ שים לב: הפניות בקטגוריה זו עשויות להיות מסיבות שונות. '
+                    f'אם לא ניתן לתת תשובה אחת לכולן — השאר כ-"לא ידוע".</small>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
                 _resp_opts = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
                 _ans = st.selectbox(
-                    f'מי אחראי לטיפול בקטגוריה "{_cat}"?',
+                    f'מי אחראי לטיפול ב"{_cat}"?',
                     _resp_opts, key=f"qa_resp_{_cat}",
+                    help=(
+                        "כשל עירוני — העירייה לא ביצעה את עבודתה\n"
+                        "התנהגות אזרח — אזרח גרם לבעיה\n"
+                        "טבעי — גשם, רוח, ציפורים, בעלי חיים\n"
+                        "לא רלוונטי — בקשות שירות, תביעות\n\n"
+                        "⚠️ אם הפניות מגוונות ואין תשובה אחת — השאר כ-'לא ידוע'"
+                    ),
                 )
                 if _ans != "השאר כ-לא ידוע":
                     _qa_answers[f"resp:{_cat}"] = _ans
 
+        # ── Type 3: Street name variants ──────────────────────────────────
+        if _st_vars:
+            st.markdown(
+                f'**🗺️ שמות רחובות בכתיבות שונות** {_TIP_STREET}',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;'
+                f'padding:.5rem .8rem;font-size:.82rem;direction:rtl;margin-bottom:.6rem;">'
+                f'💡 האחדת שמות רחובות לכתיב הרשמי משפרת את דיוק הגאוקוד (מציאת הקואורדינטות). '
+                f'<a href="https://v5.gis-net.co.il/v5/Hertzeliya?minisite=public" target="_blank">'
+                f'לבדיקת השם הנכון ב-GIS העירוני →</a></div>',
+                unsafe_allow_html=True,
+            )
+            for _sv in _st_vars:
+                _can  = _sv["canonical"]
+                _tot  = _sv["total"]
+                _reg  = _sv.get("registry_match")
+                _vars = _sv["variants"]
+                _suggested = _reg if _reg else _can
+                _vars_text = ", ".join(f'"{v["raw"]}" ({v["count"]}×)' for v in _vars[:4])
+                _reg_note = (
+                    f'<br><small style="color:#065f46;">✅ שם קנוני ב-GIS: <strong>{_reg}</strong> — '
+                    f'מומלץ להשתמש בו, אך אמת קודם</small>'
+                ) if _reg and _reg != _can else ""
+                st.markdown(
+                    f'<div style="background:#f0fdf4;border-right:3px solid #4ade80;'
+                    f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
+                    f'<strong>"{_can}"</strong> — {_tot:,} פניות סה"כ'
+                    f'{f"<br><small style=color:#475569;font-size:.79rem>כתיבות נוספות שנמצאו: {_vars_text}</small>" if _vars_text else ""}'
+                    f'{_reg_note}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                # Build variant options: each raw form that appears
+                _all_raws_for_street = [_can] + [v["raw"] for v in _vars]
+                _street_opts = ["השאר כמו שיש"] + (
+                    [_reg] if _reg and _reg not in _all_raws_for_street else []
+                ) + _all_raws_for_street
+                _ans = st.selectbox(
+                    f'מה הכתיב הנכון של "{_can}"?',
+                    _street_opts, key=f"qa_street_{_can}",
+                    index=1 if _reg and _reg not in _all_raws_for_street else 0,
+                    help=(
+                        "בחר את הכתיב הרשמי לאחר בדיקה ב-GIS העירוני.\n"
+                        "כל הפניות עם כתיב שונה יועברו לכתיב שתבחר.\n"
+                        "אל תשנה אם אינך בטוח — 'השאר כמו שיש' הוא תמיד בטוח."
+                    ),
+                )
+                if _ans != "השאר כמו שיש" and _ans != _can:
+                    # Apply to all variant raw forms in this group
+                    for _raw_v in _all_raws_for_street:
+                        if _raw_v != _ans:
+                            _qa_answers[f"street:{_raw_v}"] = _ans
+
         st.markdown("")
         if st.button("✅ החל תשובות — סווג את הקבוצות האלה", type="primary", use_container_width=True):
             if _qa_answers:
-                with st.spinner("מסווג..."):
+                with st.spinner("מסווג ומעדכן..."):
                     _updated_df = cp.apply_user_answers(df, _qa_answers)
                     st.session_state.df = _updated_df
                     _ccs = st.session_state.get("_clean_stats", {}).copy()
@@ -780,7 +988,7 @@ elif stage == "clean":
                     _ccs["conf_medium"] = int((_updated_df["_confidence"] == "medium").sum() if "_confidence" in _updated_df.columns else 0)
                     _ccs["conf_low"]    = int((_updated_df["_confidence"] == "low").sum()    if "_confidence" in _updated_df.columns else 0)
                     st.session_state["_clean_stats"] = _ccs
-                    al.log_correction("batch", "_cluster_qa", "pending", str(_qa_answers), "user_qa")
+                    al.log_correction("batch", "_cluster_qa", "pending", str(list(_qa_answers.keys())), "user_qa")
                 st.rerun()
             else:
                 st.info("לא נבחרה תשובה — בחר קטגוריה לפחות לאחת השאלות.")

@@ -219,6 +219,10 @@ _RESP_KEYWORDS = {
     "טבעי": [
         "גשם", "רוח", "עלים", "שלכת", "ענפים", "שיטפון",
         "חצץ שזורם", "סחף", "עצים נפלו",
+        # Animal/bird waste — dirty surfaces caused by nature, not humans
+        "יונים", "יונה", "ציפורים", "ציפור", "עורב", "עורבים",
+        "צואת יונים", "צואת ציפורים", "בעלי כנף", "פרחים נשרו",
+        "חתולים", "חתול", "כלב",
     ],
 }
 
@@ -599,7 +603,8 @@ def find_clusters(df: pd.DataFrame) -> dict:
     Find groups of uncertain rows that a single user answer can resolve.
     Returns:
       {"unknown_subtopics": [{value, count, examples}],
-       "unresolved_resp":   [{category, count}]}
+       "unresolved_resp":   [{category, count, desc_samples}]}
+    desc_samples are 3 random raw description strings to help the reviewer judge.
     """
     clusters: dict = {"unknown_subtopics": [], "unresolved_resp": []}
 
@@ -621,7 +626,20 @@ def find_clusters(df: pd.DataFrame) -> dict:
     if "אחריות_מקור" in df.columns and "תת_נושא_חדש" in df.columns:
         unresolved = df[df["אחריות_מקור"] == "unresolved"]
         for cat, grp in unresolved.groupby("תת_נושא_חדש"):
-            clusters["unresolved_resp"].append({"category": str(cat), "count": len(grp)})
+            # Sample up to 3 descriptions so the reviewer can judge nuance
+            import random as _rnd
+            _rng = _rnd.Random(42)
+            sample_rows = grp.dropna(subset=["תיאור"]) if "תיאור" in grp.columns else grp
+            sample_indices = _rng.sample(list(sample_rows.index), min(3, len(sample_rows)))
+            desc_samples = [
+                str(grp.at[i, "תיאור"])[:120] for i in sample_indices
+                if str(grp.at[i, "תיאור"]).strip() not in ("", "nan")
+            ]
+            clusters["unresolved_resp"].append({
+                "category": str(cat),
+                "count": len(grp),
+                "desc_samples": desc_samples,
+            })
         clusters["unresolved_resp"].sort(key=lambda x: -x["count"])
 
     return clusters
@@ -630,12 +648,28 @@ def find_clusters(df: pd.DataFrame) -> dict:
 def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
     """
     Apply user-provided answers to cluster questions and recompute confidence.
-    answers: {"subtopic:X": "category", "resp:Y": "responsibility"}
+    answer keys:
+      "subtopic:X"  → category assignment for unknown sub-topic X
+      "resp:Y"      → responsibility assignment for category Y
+      "street:ORIG" → canonical replacement for street name ORIG
     Skipped answers have value "__skip__" or empty string.
     """
     df = df.copy()
     _tier = {"low": 0, "medium": 1, "high": 2}
 
+    # First pass: re-run auto keyword resolution on currently-unresolved rows
+    # (picks up newly-added keywords like bird/pigeon without requiring user input)
+    if "אחריות_מקור" in df.columns and "תת_נושא_חדש" in df.columns:
+        unresolved_mask = df["אחריות_מקור"] == "unresolved"
+        for idx in df[unresolved_mask].index:
+            cat  = str(df.at[idx, "תת_נושא_חדש"])
+            desc = str(df.at[idx, "תיאור"]) if "תיאור" in df.columns else ""
+            new_resp = resolve_responsibility(cat, desc)
+            if new_resp != "א.מ.ל":
+                df.at[idx, "אחריות"] = new_resp
+                df.at[idx, "אחריות_מקור"] = f"keyword:{new_resp}"
+
+    # Second pass: apply explicit user answers
     for key, answer in answers.items():
         if not answer or str(answer).strip() in ("__skip__", "", "nan"):
             continue
@@ -664,6 +698,13 @@ def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
                 if mask.any():
                     df.loc[mask, "אחריות"] = answer
                     df.loc[mask, "אחריות_מקור"] = "user_resp"
+
+        elif key.startswith("street:"):
+            orig_street = key[len("street:"):]
+            if "רחוב_ראשי" in df.columns:
+                mask = df["רחוב_ראשי"] == orig_street
+                if mask.any():
+                    df.loc[mask, "רחוב_ראשי"] = answer
 
     def _recompute(row):
         cat_src  = str(row.get("סיווג_מקור", ""))
