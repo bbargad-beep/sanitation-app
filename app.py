@@ -512,20 +512,35 @@ def _find_street_variants(df: pd.DataFrame) -> list:
         import geocode_pipeline as _gp
 
         _prefix = _re.compile(r"^(רחוב|רח[׳'״]|ר[׳'״]|ה?רחוב)\s+", _re.UNICODE)
-        # Strip trailing: punctuation, house numbers (standalone digits), postal codes
-        _suffix = _re.compile(r"(\s+\d{1,5}|[,\.;]\s*\d*|ת\.א|ת\.ל)\s*$", _re.UNICODE)
+        # A trailing house-number token: leading separator, digits, optional
+        # apartment letter, optional /sub-number — e.g. " 14", " 14א", " 14/2", ", 3"
+        _house = _re.compile(r"[\s,./\-]+\d{1,4}\s*[א-ת]?(?:\s*/\s*\d+)?\s*$", _re.UNICODE)
+        _trailing_punct = _re.compile(r"[\s,\.;׳״'\"־\-]+$", _re.UNICODE)
 
         def _clean_raw(s: str) -> str:
-            """Normalize a raw street value for deduplication: strip spaces + house numbers."""
+            """
+            Reduce a raw street value to its bare NAME: drop the רחוב prefix,
+            then repeatedly strip trailing house numbers and punctuation. House
+            numbers are NOT part of the street name and must never make two rows
+            look like different spellings.
+            """
             s = str(s).strip()
             s = _prefix.sub("", s)
-            s = _suffix.sub("", s)
+            prev = None
+            while prev != s:
+                prev = s
+                stripped = _house.sub("", s).strip()
+                # Never strip away the whole name (guard streets that end in a digit)
+                if stripped and _re.search(r"[א-ת]", stripped):
+                    s = stripped
+                s2 = _trailing_punct.sub("", s).strip()
+                if s2 and _re.search(r"[א-ת]", s2):
+                    s = s2
             return s.strip()
 
         def _norm_key(s: str) -> str:
-            """Additional normalization for grouping: NFC unicode so ״ variants collapse."""
-            s = _clean_raw(s)
-            return _ud.normalize("NFC", s)
+            """NFC-normalize so ״/" quote variants of the same name collapse."""
+            return _ud.normalize("NFC", _clean_raw(s))
 
         streets = df["רחוב_ראשי"].dropna().astype(str) if "רחוב_ראשי" in df.columns else pd.Series(dtype=str)
         streets = streets[streets.str.strip() != ""]
@@ -545,18 +560,21 @@ def _find_street_variants(df: pd.DataFrame) -> list:
         results = []
         for norm_key, cleaned_cnt_map in norm_groups.items():
             total = sum(cleaned_cnt_map.values())
-            if total < 5:
+            if total < 4:
                 continue
             all_cleaned = sorted(cleaned_cnt_map, key=lambda k: -cleaned_cnt_map[k])
             canonical = all_cleaned[0]
-            # Variants are forms that differ in actual spelling (not just whitespace/numbers)
-            variants = [{"raw": r, "count": cleaned_cnt_map[r]} for r in all_cleaned[1:] if cleaned_cnt_map[r] >= 2]
+            # Variants = every OTHER cleaned spelling (numbers already stripped, so
+            # anything remaining is a genuine spelling difference). Show up to 6.
+            variants = [{"raw": r, "count": cleaned_cnt_map[r]} for r in all_cleaned[1:]][:6]
 
-            # Check registry for canonical spelling
+            # Check registry for the official canonical spelling
             reg_canon, _ = _gp._registry_resolve(norm_key)
             if reg_canon is None:
                 reg_canon, _ = _gp._registry_resolve(canonical)
 
+            # Surface a group if there are competing spellings in the data, OR the
+            # data's spelling differs from the official municipal registry.
             if variants or (reg_canon and reg_canon != canonical):
                 results.append({
                     "canonical": canonical,
@@ -566,7 +584,7 @@ def _find_street_variants(df: pd.DataFrame) -> list:
                     "registry_match": reg_canon,
                 })
 
-        return sorted(results, key=lambda x: -x["total"])[:15]
+        return sorted(results, key=lambda x: -x["total"])[:30]
     except Exception:
         return []
 
@@ -851,7 +869,7 @@ elif stage == "clean":
         st.markdown("---")
         _total_q_rows = (
             sum(c["count"] for c in _clusters["unknown_subtopics"]) +
-            sum(c["total"] for c in _clusters["unresolved_resp"]) +
+            sum(c["unresolved"] for c in _clusters["unresolved_resp"]) +
             sum(v["total"] for v in _st_vars)
         )
         st.markdown(
@@ -893,80 +911,84 @@ elif stage == "clean":
                 if _ans != "השאר לבדיקה ב-Excel":
                     _qa_answers[f"subtopic:{_sub}"] = _ans
 
-        # ── Type 2: Unresolved responsibility — per sub-group questions ──
+        # ── Type 2: Unresolved responsibility — data-discovered questions ──
+        #  Each question is labelled by what is OBSERVED in the free text
+        #  (a recurring word), never by the answer, so it is never circular.
         if _clusters["unresolved_resp"]:
             st.markdown(
                 f'**📋 קטגוריות שלא ברור מי אחראי לטיפול** {_TIP_RESP}',
                 unsafe_allow_html=True,
             )
-            _RESP_COLORS = {
-                "כשל עירוני":      ("#eff6ff", "#3b82f6"),
-                "התנהגות אזרח":   ("#fff7ed", "#fb923c"),
-                "טבעי":            ("#f0fdf4", "#4ade80"),
-                "לא רלוונטי":     ("#f1f5f9", "#94a3b8"),
-            }
+            # Numbered, bold, one-per-line explanation shown on every ❓ bubble
             _RESP_HELP = (
-                "כשל עירוני — העירייה לא ביצעה את עבודתה\n"
-                "התנהגות אזרח — אזרח גרם לבעיה בהתנהגותו\n"
-                "טבעי — גשם, רוח, ציפורים, בעלי חיים\n"
-                "לא רלוונטי — בקשות שירות, תביעות\n\n"
-                "אם לא ניתן לתת תשובה אחת — השאר כ-'לא ידוע'"
+                "מי גרם לבעיה, לפי תוכן הפנייה:\n\n"
+                "1. **כשל עירוני** — העירייה לא ביצעה את עבודתה (פינוי/ניקוי שלא נעשה, ציוד שהתקלקל)\n\n"
+                "2. **התנהגות אזרח** — אדם גרם לבעיה (זרק אשפה, פיזר פסולת, בעל כלב)\n\n"
+                "3. **טבעי** — הטבע גרם לבעיה (גשם, רוח, עלים, ציפורים)\n\n"
+                "4. **לא רלוונטי** — בקשת שירות או תביעה, לא תקלה\n\n"
+                "אם אינך בטוח — השאר כ-'לא ידוע'."
             )
-            for _cl in _clusters["unresolved_resp"]:
-                _cat        = _cl["category"]
-                _total      = _cl["total"]
-                _sub_groups = _cl.get("sub_groups", [])
-                _unmatched  = _cl.get("unmatched_count", 0)
+            _RESP_OPTS = ["— השאר כלא ידוע —"] + cp.KNOWN_RESPONSIBILITIES
 
-                with st.expander(f'📂 "{_cat}" — {_total:,} פניות', expanded=True):
-                    for _sg in _sub_groups:
-                        _resp      = _sg["resp"]
-                        _sg_cnt    = _sg["count"]
-                        _kws       = _sg.get("trigger_keywords", [])
-                        _sg_smpl   = _sg.get("desc_samples", [])
-                        _bg, _brd  = _RESP_COLORS.get(_resp, ("#fafafa", "#94a3b8"))
-                        _kw_str    = "، ".join(_kws[:5]) if _kws else ""
+            def _resp_index(guess):
+                return _RESP_OPTS.index(guess) if guess in _RESP_OPTS else 0
+
+            for _cl in _clusters["unresolved_resp"]:
+                _cat      = _cl["category"]
+                _unres    = _cl.get("unresolved", 0)
+                _pgroups  = _cl.get("pattern_groups", [])
+                _remain   = _cl.get("remainder", 0)
+                _guess    = _cl.get("default_guess")
+
+                with st.expander(f'📂 "{_cat}" — {_unres:,} פניות ללא סיווג אחריות', expanded=True):
+                    # One question per data-discovered word (answerable + specific)
+                    for _pg in _pgroups:
+                        _obs    = _pg["observation"]
+                        _pg_cnt = _pg["count"]
+                        _smpl   = _pg.get("desc_samples", [])
                         _smpl_html = ""
-                        if _sg_smpl:
+                        if _smpl:
                             _smpl_html = (
                                 '<br><small style="color:#78716c;font-size:.79rem;">'
-                                + "<br>".join(f"• {s}" for s in _sg_smpl) + "</small>"
+                                '<em>דוגמאות:</em><br>'
+                                + "<br>".join(f"• {s}" for s in _smpl) + "</small>"
                             )
                         st.markdown(
-                            f'<div style="background:{_bg};border-right:3px solid {_brd};'
+                            f'<div style="background:#f8fafc;border-right:3px solid #6366f1;'
                             f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.45rem 0 .15rem;">'
-                            f'<strong>{_resp}</strong> — {_sg_cnt:,} פניות'
-                            f'{"<br><small style=color:#64748b;font-size:.79rem>מילות מפתח: " + _kw_str + "</small>" if _kw_str else ""}'
+                            f'פניות שמזכירות <strong>"{_obs}"</strong> — {_pg_cnt:,} פניות'
                             f'{_smpl_html}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-                        _resp_opts_sg = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
-                        _sg_key = f"qa_rsub_{_cat}_{_resp}"
-                        _ans_sg = st.selectbox(
-                            f'מי אחראי לפניות מסוג "{_resp}" ב"{_cat}"?',
-                            _resp_opts_sg, key=_sg_key, help=_RESP_HELP,
+                        _ans_pg = st.selectbox(
+                            f'מי אחראי לפניות שמזכירות "{_obs}"?',
+                            _RESP_OPTS, key=f"qa_rterm_{_cat}_{_obs}", help=_RESP_HELP,
                         )
-                        if _ans_sg != "השאר כ-לא ידוע":
-                            _qa_answers[f"resp_sub:{_cat}:{_resp}"] = _ans_sg
+                        if _ans_pg != _RESP_OPTS[0]:
+                            _qa_answers[f"resp_term:{_cat}:{_obs}"] = _ans_pg
 
-                    if _unmatched > 0:
+                    # A single default question for everything else in the category
+                    if _remain > 0:
+                        _guess_note = (
+                            f'<br><small style="color:#065f46;font-size:.78rem;">'
+                            f'💡 הצעה לפי פניות דומות שכבר סווגו: <strong>{_guess}</strong></small>'
+                        ) if _guess else ""
                         st.markdown(
                             f'<div style="background:#fafafa;border-right:3px solid #94a3b8;'
-                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.45rem 0 .15rem;">'
-                            f'<strong>פניות שלא תאמו אף קבוצה</strong> — {_unmatched:,} פניות'
-                            f'<br><small style="color:#64748b;font-size:.79rem;">פניות אלו לא הכילו מילות מפתח שמזהות את הסיבה.</small>'
+                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.6rem 0 .15rem;">'
+                            f'<strong>שאר הפניות ב"{_cat}"</strong> — {_remain:,} פניות'
+                            f'{_guess_note}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-                        _resp_opts_um = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
-                        _um_key = f"qa_runm_{_cat}"
-                        _ans_um = st.selectbox(
-                            f'מי אחראי לשאר הפניות ב"{_cat}" (ללא מילות מפתח)?',
-                            _resp_opts_um, key=_um_key, help=_RESP_HELP,
+                        _ans_def = st.selectbox(
+                            f'מהי ברירת המחדל לאחריות בשאר הפניות ב"{_cat}"?',
+                            _RESP_OPTS, key=f"qa_rdef_{_cat}",
+                            index=_resp_index(_guess), help=_RESP_HELP,
                         )
-                        if _ans_um != "השאר כ-לא ידוע":
-                            _qa_answers[f"resp_unmatched:{_cat}"] = _ans_um
+                        if _ans_def != _RESP_OPTS[0]:
+                            _qa_answers[f"resp_default:{_cat}"] = _ans_def
 
         # ── Type 3: Street name variants ──────────────────────────────────
         if _st_vars:

@@ -215,14 +215,16 @@ _RESP_KEYWORDS = {
     "התנהגות אזרח": [
         "פיזרו", "זרקו", "אנשים", "שכנים", "דיירים", "מישהו",
         "גנבו", "גנב", "נגנב", "עקרו", "פרצו",
+        # Pet waste — the owner is responsible, not "nature"
+        "כלב", "כלבים", "צואת כלבים", "בעל הכלב", "בעלי כלבים", "צואת כלב",
     ],
     "טבעי": [
         "גשם", "רוח", "עלים", "שלכת", "ענפים", "שיטפון",
         "חצץ שזורם", "סחף", "עצים נפלו",
-        # Animal/bird waste — dirty surfaces caused by nature, not humans
+        # Wild bird/animal waste — dirty surfaces caused by nature, not humans
         "יונים", "יונה", "ציפורים", "ציפור", "עורב", "עורבים",
         "צואת יונים", "צואת ציפורים", "בעלי כנף", "פרחים נשרו",
-        "חתולים", "חתול", "כלב",
+        "חתולים", "חתול",
     ],
 }
 
@@ -597,21 +599,87 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
 KNOWN_CATEGORIES_LIST = sorted(RESPONSIBILITY_MAP.keys())
 KNOWN_RESPONSIBILITIES = ["כשל עירוני", "התנהגות אזרח", "טבעי", "לא רלוונטי"]
 
+# Common Hebrew function words + boilerplate that carry no cause signal.
+# Removed before discovering which *content* words recur in the free text.
+_HEB_STOPWORDS = {
+    "של", "על", "את", "לא", "עם", "יש", "זה", "זו", "זאת", "גם", "אני", "הוא",
+    "היא", "כי", "אבל", "או", "כמו", "אחרי", "לפני", "בין", "כבר", "מאוד", "פה",
+    "שם", "ליד", "מול", "רחוב", "רח", "בית", "כתובת", "אזור", "מקום", "בבקשה",
+    "תודה", "שלום", "פנייה", "פניה", "פונה", "מבקש", "מבקשת", "מבקשים", "צריך",
+    "צריכה", "וגם", "אנא", "כאן", "היום", "אתמול", "שוב", "הרבה", "כל", "כמה",
+    "מה", "יותר", "עדיין", "בגלל", "נמצא", "נמצאת", "וכן", "אחד", "אחת", "שני",
+    "שתי", "הזה", "הזאת", "להיות", "גורם", "מספר", "דירה", "קומה", "כניסה",
+    "בניין", "ברחוב", "וכו", "שכתובת", "גבי", "אך", "רק", "אם", "כדי", "כן",
+    "לכן", "אשר", "היה", "היתה", "הייתה", "יהיה", "איזה", "איזו", "מתי", "למה",
+    "לנו", "להם", "אלי", "אליו", "אליה", "שלנו", "שלהם", "שלי", "שלו", "שלה",
+    "עדין", "מאד", "ליום", "בימים", "בשעה", "בשעות", "אחה", "בוקר", "ערב",
+}
+
+
+def _tokenize_heb(text) -> list:
+    """Split Hebrew free-text into content tokens (2+ Hebrew letters, no stopwords)."""
+    toks = re.findall(r"[א-ת]{2,}", str(text))
+    return [t for t in toks if t not in _HEB_STOPWORDS]
+
+
+def _discover_patterns(desc_list: list, min_count: int = 5, max_groups: int = 4):
+    """
+    Data-driven pattern discovery: find the content words that recur most often
+    across a set of free-text descriptions, and form one answerable group per
+    recurring word. This lets the app generate its OWN questions ("calls that
+    mention X — who is responsible?") instead of relying only on a fixed
+    keyword list.
+
+    Returns (groups, used_row_positions) where groups is a list of
+    {"term": str, "count": int, "row_idxs": [positions into desc_list]} and
+    groups are made disjoint (each row assigned to its strongest term) so the
+    reviewer never answers about the same call twice.
+    """
+    from collections import Counter
+    counts: Counter = Counter()
+    per_term_rows: dict = {}
+    for i, d in enumerate(desc_list):
+        for t in set(_tokenize_heb(d)):
+            counts[t] += 1
+            per_term_rows.setdefault(t, []).append(i)
+
+    groups = []
+    used: set = set()
+    for term, _cnt in counts.most_common():
+        if _cnt < min_count:
+            break
+        rows = [i for i in per_term_rows[term] if i not in used]
+        if len(rows) < min_count:
+            continue
+        groups.append({"term": term, "count": len(rows), "row_idxs": rows})
+        used.update(rows)
+        if len(groups) >= max_groups:
+            break
+    return groups, used
+
 
 def find_clusters(df: pd.DataFrame) -> dict:
     """
     Find groups of uncertain rows that a user answer can resolve.
 
-    For responsibility, each ambiguous category is split into keyword-detected
-    sub-groups (one sub-question per detected pattern) plus an unmatched
-    remainder — so the reviewer gets specific, targeted questions instead of
-    one blunt question for an entire mixed category.
+    Design principle — every generated question must be:
+      • ANSWERABLE  — shows a concrete, homogeneous group with real samples
+      • NON-CIRCULAR — labelled by what is OBSERVED in the text, never by the
+                       answer we want (we never ask "who is responsible for the
+                       'municipal-failure' calls?")
+      • WORTH ASKING — only rows still genuinely unresolved after auto-cleaning
+                       (keyword/map matches are already assigned, so we don't
+                       re-ask about them)
+
+    For each ambiguous category we take only the rows whose responsibility is
+    still unknown, then discover which content words recur in their free text
+    and turn each into a question. A single default question covers the rest.
 
     Returns:
       {"unknown_subtopics": [{value, count, examples}],
-       "unresolved_resp":   [{category, total,
-                              sub_groups: [{resp, count, trigger_keywords, desc_samples}],
-                              unmatched_count}]}
+       "unresolved_resp":   [{category, total, unresolved,
+                              pattern_groups: [{observation, count, desc_samples}],
+                              remainder, default_guess}]}
     """
     clusters: dict = {"unknown_subtopics": [], "unresolved_resp": []}
 
@@ -630,63 +698,64 @@ def find_clusters(df: pd.DataFrame) -> dict:
                 )
         clusters["unknown_subtopics"].sort(key=lambda x: -x["count"])
 
-    # Ambiguous-responsibility categories — split by keyword sub-groups
+    # Ambiguous-responsibility categories — ask ONLY about still-unresolved rows
     _AMBIGUOUS_CATS = {cat for cat, resp in RESPONSIBILITY_MAP.items() if resp == "א.מ.ל"}
     if "תת_נושא_חדש" in df.columns and "תיאור" in df.columns:
         import random as _rnd
         _rng = _rnd.Random(42)
+        has_src = "אחריות_מקור" in df.columns
 
         for cat in sorted(_AMBIGUOUS_CATS):
             cat_rows = df[df["תת_נושא_חדש"] == cat]
             if len(cat_rows) < 3:
                 continue
 
-            accounted: set = set()
-            sub_groups = []
+            # Rows still genuinely unknown (keyword/map matches already resolved)
+            if has_src:
+                unresolved = cat_rows[cat_rows["אחריות_מקור"] == "unresolved"]
+            else:
+                unresolved = cat_rows[cat_rows["אחריות"] == "א.מ.ל"]
+            if len(unresolved) < 5:
+                continue
 
-            for resp_label, keywords in _RESP_KEYWORDS.items():
-                kw_matched = cat_rows.loc[
-                    ~cat_rows.index.isin(accounted) &
-                    cat_rows["תיאור"].apply(
-                        lambda d: any(kw in str(d) for kw in keywords) if pd.notna(d) else False
-                    )
-                ]
-                if kw_matched.empty:
-                    continue
+            desc_list = unresolved["תיאור"].fillna("").astype(str).tolist()
+            min_count = max(5, len(unresolved) // 50)
+            groups, used = _discover_patterns(desc_list, min_count=min_count, max_groups=4)
 
-                # Which specific keywords triggered matches in this sub-group
-                triggered = [kw for kw in keywords
-                             if kw_matched["תיאור"].str.contains(kw, na=False).any()][:4]
-                # Sample descriptions
-                desc_pool = kw_matched["תיאור"].dropna().tolist()
-                sample_idxs = _rng.sample(range(len(desc_pool)), min(2, len(desc_pool)))
-                samples = [str(desc_pool[i])[:110] for i in sample_idxs
-                           if str(desc_pool[i]).strip() not in ("", "nan")]
-
-                sub_groups.append({
-                    "resp": resp_label,
-                    "count": len(kw_matched),
-                    "trigger_keywords": triggered,
+            pattern_groups = []
+            for g in groups:
+                pool = [desc_list[i] for i in g["row_idxs"] if desc_list[i].strip()]
+                samp_idx = _rng.sample(range(len(pool)), min(2, len(pool))) if pool else []
+                samples = [pool[i][:120] for i in samp_idx]
+                pattern_groups.append({
+                    "observation":  g["term"],
+                    "count":        g["count"],
                     "desc_samples": samples,
                 })
-                accounted.update(kw_matched.index)
 
-            unmatched = len(cat_rows) - len(accounted)
+            remainder = len(unresolved) - len(used)
 
-            # Only include category in Q&A if it has keyword sub-groups OR unresolved rows
-            has_unresolved = (
-                "אחריות_מקור" in df.columns and
-                int((cat_rows["אחריות_מקור"] == "unresolved").sum()) > 0
-            )
-            if sub_groups or (has_unresolved and unmatched > 0):
-                clusters["unresolved_resp"].append({
-                    "category": cat,
-                    "total": len(cat_rows),
-                    "sub_groups": sub_groups,
-                    "unmatched_count": unmatched,
-                })
+            # Soft default suggestion = the responsibility most common among the
+            # rows in this category that WERE resolved automatically.
+            default_guess = None
+            if has_src:
+                resolved = cat_rows[cat_rows["אחריות_מקור"] != "unresolved"]
+                if len(resolved):
+                    vc = resolved["אחריות"].value_counts()
+                    vc = vc[~vc.index.isin(["א.מ.ל"])]
+                    if len(vc):
+                        default_guess = str(vc.index[0])
 
-        clusters["unresolved_resp"].sort(key=lambda x: -x["total"])
+            clusters["unresolved_resp"].append({
+                "category":       cat,
+                "total":          len(cat_rows),
+                "unresolved":     len(unresolved),
+                "pattern_groups": pattern_groups,
+                "remainder":      remainder,
+                "default_guess":  default_guess,
+            })
+
+        clusters["unresolved_resp"].sort(key=lambda x: -x["unresolved"])
 
     return clusters
 
@@ -737,8 +806,40 @@ def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
                         elif new_resp != "א.מ.ל":
                             df.at[idx, "אחריות_מקור"] = f"keyword:{new_resp}"
 
+        elif key.startswith("resp_term:"):
+            # "resp_term:{category}:{observed_word}" — applies to still-unresolved
+            # rows of the category whose free text contains that discovered word.
+            parts = key.split(":", 2)
+            if len(parts) == 3:
+                _, category, term = parts
+                if term and "תת_נושא_חדש" in df.columns and "תיאור" in df.columns:
+                    mask = df["תת_נושא_חדש"] == category
+                    if "אחריות_מקור" in df.columns:
+                        mask &= (df["אחריות_מקור"] == "unresolved")
+                    else:
+                        mask &= (df["אחריות"] == "א.מ.ל")
+                    mask &= df["תיאור"].apply(
+                        lambda d: term in str(d) if pd.notna(d) else False)
+                    if mask.any():
+                        df.loc[mask, "אחריות"] = answer
+                        df.loc[mask, "אחריות_מקור"] = "user_resp_term"
+
+        elif key.startswith("resp_default:"):
+            # "resp_default:{category}" — applies to every remaining unresolved
+            # row of the category (the reviewer's default for the leftovers).
+            category = key[len("resp_default:"):]
+            if "תת_נושא_חדש" in df.columns:
+                mask = df["תת_נושא_חדש"] == category
+                if "אחריות_מקור" in df.columns:
+                    mask &= (df["אחריות_מקור"] == "unresolved")
+                else:
+                    mask &= (df["אחריות"] == "א.מ.ל")
+                if mask.any():
+                    df.loc[mask, "אחריות"] = answer
+                    df.loc[mask, "אחריות_מקור"] = "user_resp_default"
+
         elif key.startswith("resp_sub:"):
-            # "resp_sub:{category}:{keyword_group_label}" — applies to rows matching keywords
+            # Legacy: "resp_sub:{category}:{keyword_group_label}"
             parts = key.split(":", 2)
             if len(parts) == 3:
                 _, category, kw_group = parts
@@ -754,7 +855,7 @@ def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
                         df.loc[mask, "אחריות_מקור"] = "user_resp_kw"
 
         elif key.startswith("resp_unmatched:"):
-            # "resp_unmatched:{category}" — applies to rows with NO keyword match
+            # Legacy: "resp_unmatched:{category}"
             category = key[len("resp_unmatched:"):]
             if "תת_נושא_חדש" in df.columns and "תיאור" in df.columns:
                 cat_mask = df["תת_נושא_חדש"] == category
@@ -789,7 +890,8 @@ def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
         addr_r   = str(row.get("מסלול_כתובת", ""))
         cat_conf  = ("high"   if cat_src in ("map", "user_map") else
                      "medium" if cat_src == "topic_fallback" else "low")
-        resp_conf = ("high"   if resp_src in ("map", "user_resp", "user_resp_kw", "user_resp_unmatched") else
+        resp_conf = ("high"   if resp_src in ("map", "user_resp", "user_resp_kw", "user_resp_unmatched",
+                                              "user_resp_term", "user_resp_default") else
                      "medium" if resp_src.startswith("keyword:") else "low")
         if addr_r in ("std", "intersection", "range"):
             addr_conf = "high"
