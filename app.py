@@ -679,6 +679,30 @@ def stepper_html(current: str) -> str:
     return '<div class="stepper">' + "".join(cells) + "</div>"
 
 
+def _render_stepper_nav(current: str):
+    """Render the stepper as clickable Streamlit buttons (one per completed/active stage)."""
+    order = [s[0] for s in STAGES]
+    ci = order.index(current)
+    has_data = st.session_state.get("df") is not None
+    cols = st.columns(len(STAGES))
+    for i, (key, label) in enumerate(STAGES):
+        is_active = key == current
+        is_done   = i < ci
+        is_next   = i > ci
+        # Can navigate to: any done stage, or current stage (no-op), or next stage if data exists
+        reachable = (is_done or is_active) and has_data
+        with cols[len(STAGES) - 1 - i]:   # RTL: reverse column order
+            if is_active:
+                st.button(f"{'✓ ' if is_done else ''}{i+1}. {label}", disabled=True,
+                          use_container_width=True, key=f"_step_{key}")
+            elif reachable:
+                if st.button(f"✓ {i+1}. {label}", use_container_width=True, key=f"_step_{key}"):
+                    goto(key)
+            else:
+                st.button(f"{i+1}. {label}", disabled=True, use_container_width=True,
+                          key=f"_step_{key}")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  HEADER + STEPPER
 # ══════════════════════════════════════════════════════════════════════════
@@ -707,7 +731,7 @@ if (st.session_state.get("df") is not None
         unsafe_allow_html=True)
     st.session_state["_just_restored"] = False
 
-st.markdown(stepper_html(st.session_state.stage), unsafe_allow_html=True)
+_render_stepper_nav(st.session_state.stage)
 stage = st.session_state.stage
 
 
