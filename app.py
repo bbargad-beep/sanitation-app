@@ -466,6 +466,13 @@ def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
     return buf.getvalue()
 
 
+def _center_style(df: pd.DataFrame):
+    """Return a pandas Styler with centered, RTL cells — works in both HTML and canvas modes."""
+    return (df.style
+              .set_properties(**{"text-align": "center", "direction": "rtl"})
+              .set_table_styles([{"selector": "th", "props": [("text-align", "center"), ("direction", "rtl")]}]))
+
+
 def _render_flagged_table(df: pd.DataFrame, max_rows: int = 500):
     """
     Render a flagged-rows table with explicit column widths so the browser
@@ -486,7 +493,7 @@ def _render_flagged_table(df: pd.DataFrame, max_rows: int = 500):
     display = df[present].head(max_rows).copy()
     col_cfg = {c: COLS[c] for c in present}
     h = min(480, max(80, len(display) * 35 + 42))
-    st.dataframe(display, column_config=col_cfg, hide_index=True, height=h)
+    st.dataframe(_center_style(display), column_config=col_cfg, hide_index=True, height=h)
     if len(df) > max_rows:
         st.caption(f"מוצגות {max_rows} שורות ראשונות מתוך {len(df):,}")
 
@@ -911,13 +918,15 @@ elif stage == "clean":
         with col_bd1:
             if n_block > 0:
                 st.markdown("**🔴 פירוט בעיות חוסמות:**")
-                st.dataframe(_flag_breakdown(flagged, "block"), hide_index=True,
+                _bd_block = _flag_breakdown(flagged, "block")
+                st.dataframe(_center_style(_bd_block), hide_index=True,
                              column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
                                             "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
         with col_bd2:
             if n_warn > 0:
                 st.markdown("**🟡 פירוט אזהרות:**")
-                st.dataframe(_flag_breakdown(flagged, "warn"), hide_index=True,
+                _bd_warn = _flag_breakdown(flagged, "warn")
+                st.dataframe(_center_style(_bd_warn), hide_index=True,
                              column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
                                             "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
 
@@ -1469,7 +1478,7 @@ elif stage == "enrich":
 
         zc = df["רובע_פינוי"].value_counts().reset_index()
         zc.columns = ["רובע", "מספר פניות"]
-        st.dataframe(zc, use_container_width=True, hide_index=True)
+        st.dataframe(_center_style(zc), use_container_width=True, hide_index=True)
 
         if n_unknown > 0:
             st.markdown(f'<div class="banner-warn">⚠️ {n_unknown} שורות ללא רובע — אלו שורות '
@@ -1643,7 +1652,7 @@ elif stage == "output":
                    .reset_index(name="חזרות").sort_values("חזרות", ascending=False).head(10)
                    .rename(columns={"רחוב_ראשי":"רחוב","מספר_בית":"מס׳ בית","תת_נושא_חדש":"קטגוריה"}))
             if not hot.empty:
-                st.dataframe(hot, use_container_width=True, hide_index=True)
+                st.dataframe(_center_style(hot), use_container_width=True, hide_index=True)
             else:
                 st.caption("אין תלונות חוזרות בפרוסה זו.")
 
@@ -1692,7 +1701,7 @@ elif stage == "output":
                                    max_value=99999, value=42, step=1, key="qa_seed")
         if st.button("▶ הרץ דגימת QA", type="primary", use_container_width=True):
             _qa_result = qs.run_sampling_plan(df, seed=int(_qa_seed) or None)
-            st.dataframe(_qa_result, use_container_width=True, hide_index=True)
+            st.dataframe(_center_style(_qa_result), use_container_width=True, hide_index=True)
             n_reject = int((_qa_result["פסיקה"].str.startswith("❌")).sum())
             if n_reject == 0:
                 st.success("כל הרמות עברו את דגימת ה-QA")
@@ -1728,7 +1737,7 @@ elif stage == "validate":
 
             st.markdown("#### הסכמה לפי עמודה")
             st.dataframe(
-                result["per_column"].sort_values("אחוז_הסכמה"),
+                _center_style(result["per_column"].sort_values("אחוז_הסכמה")),
                 hide_index=True,
                 column_config={
                     "עמודה":       st.column_config.TextColumn("עמודה",          width=160),
@@ -1742,7 +1751,7 @@ elif stage == "validate":
             with st.expander("📋 פרטי שורות שונות"):
                 _diff_cfg = {c: st.column_config.TextColumn(c, width=140)
                              for c in result["diff"].columns}
-                st.dataframe(result["diff"], column_config=_diff_cfg, hide_index=True)
+                st.dataframe(_center_style(result["diff"]), column_config=_diff_cfg, hide_index=True)
         except Exception as e:
             st.error(f"שגיאה בהשוואה: {e}")
     elif ref_file is None:
