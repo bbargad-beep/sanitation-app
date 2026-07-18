@@ -589,36 +589,140 @@ def _find_street_variants(df: pd.DataFrame) -> list:
         return []
 
 
+# ── Colour maps for semantic columns ────────────────────────────────────────
+_RESP_BG = {
+    "כשל עירוני":    "#dbeafe",
+    "התנהגות אזרח": "#ffedd5",
+    "טבעי":          "#d1fae5",
+    "לא רלוונטי":   "#f1f5f9",
+    "א.מ.ל":         "#fef9c3",
+}
+_CONF_BG = {"high": "#d1fae5", "medium": "#dbeafe", "low": "#ffedd5"}
+_FLAG_BG = {"block": "#fee2e2", "warn": "#fef3c7", "":  ""}
+
+# Pretty column headers (internal name → display label)
+_COL_LABELS = {
+    "מס' פניה": "מס׳ פניה", "תאריך": "תאריך", "תת_נושא_חדש": "קטגוריה",
+    "אחריות": "אחריות", "רחוב_ראשי": "רחוב", "מספר_בית": "מס׳ בית",
+    "סוג_מיקום": "סוג מיקום", "geocode_method": "גאוקוד",
+    "_flag_labels": "בעיות", "_confidence": "ביטחון",
+    "כתובת ואתר/מוסד": "כתובת מקורית", "תת נושא מקורי": "נושא מקורי",
+    "תיאור": "תיאור", "סוג בעיה": "סוג בעיה", "שורות": "שורות",
+    "רובע": "רובע", "מספר פניות": "מספר פניות",
+    "רחוב": "רחוב", "מס׳ בית": "מס׳ בית", "קטגוריה": "קטגוריה",
+    "עמודה": "עמודה", "אחוז_הסכמה": "% הסכמה", "הסכמות": "הסכמות",
+    "חילוקים": "חילוקים",
+}
+
+
+def _style_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    """
+    Apply semantic row/cell colouring to a DataFrame and return a Styler.
+    Colours responsibility, confidence, and flag-severity columns; leaves
+    everything else white. All cells are centred and RTL.
+    """
+    styled = df.style.set_properties(**{
+        "text-align": "center", "direction": "rtl",
+        "font-size": "0.84rem", "padding": "5px 10px",
+    }).set_table_styles([{
+        "selector": "th",
+        "props": [("text-align", "center"), ("direction", "rtl"),
+                  ("font-size", "0.82rem"), ("background", "#f8fafc"),
+                  ("font-weight", "600"), ("padding", "6px 10px")],
+    }])
+
+    def _cell_color(val, col):
+        bg = ""
+        if col == "אחריות":
+            bg = _RESP_BG.get(str(val), "")
+        elif col == "_confidence":
+            bg = _CONF_BG.get(str(val), "")
+        elif col == "_flag_severity":
+            bg = _FLAG_BG.get(str(val), "")
+        elif col == "_flag_labels" and str(val).strip():
+            bg = "#fff7ed"
+        return f"background:{bg};" if bg else ""
+
+    for col in df.columns:
+        if col in ("אחריות", "_confidence", "_flag_severity", "_flag_labels"):
+            styled = styled.applymap(lambda v, c=col: _cell_color(v, c), subset=[col])
+
+    return styled
+
+
+def _col_cfg(df: pd.DataFrame) -> dict:
+    """Build column_config dict with labelled, width-appropriate columns."""
+    cfg = {}
+    for c in df.columns:
+        label = _COL_LABELS.get(c, c)
+        if c in ("תיאור", "כתובת ואתר/מוסד", "_flag_labels"):
+            cfg[c] = st.column_config.TextColumn(label, width="large")
+        elif c in ("מס' פניה", "תאריך", "מספר_בית", "מס׳ בית", "שורות", "מספר פניות"):
+            cfg[c] = st.column_config.TextColumn(label, width="small")
+        elif c in ("אחוז_הסכמה",):
+            cfg[c] = st.column_config.ProgressColumn(label, min_value=0, max_value=100, format="%.1f%%")
+        else:
+            cfg[c] = st.column_config.TextColumn(label, width="medium")
+    return cfg
+
+
+def _table(df: pd.DataFrame, *, search: bool = False, max_rows: int = 500,
+           height: int | None = None, caption: str = "", use_container_width: bool = True):
+    """
+    Unified interactive table renderer used everywhere in the app.
+
+    • Semantic colour-coding on responsibility, confidence, and flag columns
+    • Optional live search bar that filters all text columns simultaneously
+    • Auto-height based on row count (capped at 520 px)
+    • 'Show more' caption when rows are truncated
+    """
+    display = df.copy()
+    # Drop internal helper columns from display
+    display = display[[c for c in display.columns if not c.startswith("_flag_severity")]]
+
+    if search and len(display) > 5:
+        _q = st.text_input("🔍 חיפוש בטבלה", key=f"_tbl_search_{id(df)}",
+                           placeholder="הקלד לסינון שורות...", label_visibility="collapsed")
+        if _q:
+            mask = display.apply(
+                lambda col: col.astype(str).str.contains(_q, case=False, na=False)
+            ).any(axis=1)
+            display = display[mask]
+            if display.empty:
+                st.caption(f"אין תוצאות עבור \"{_q}\"")
+                return
+
+    total = len(display)
+    display = display.head(max_rows)
+    h = height or min(520, max(60, len(display) * 36 + 44))
+
+    st.dataframe(
+        _style_table(display),
+        column_config=_col_cfg(display),
+        hide_index=True,
+        height=h,
+        use_container_width=use_container_width,
+    )
+    parts = []
+    if caption:
+        parts.append(caption)
+    if total > max_rows:
+        parts.append(f"מוצגות {max_rows:,} שורות ראשונות מתוך {total:,}")
+    if parts:
+        st.caption(" · ".join(parts))
+
+
 def _center_style(df: pd.DataFrame):
-    """Return a pandas Styler with centered, RTL cells — works in both HTML and canvas modes."""
-    return (df.style
-              .set_properties(**{"text-align": "center", "direction": "rtl"})
-              .set_table_styles([{"selector": "th", "props": [("text-align", "center"), ("direction", "rtl")]}]))
+    """Legacy alias — kept so call sites not yet migrated still work."""
+    return _style_table(df)
 
 
 def _render_flagged_table(df: pd.DataFrame, max_rows: int = 500):
-    """
-    Render a flagged-rows table with explicit column widths so the browser
-    shows a horizontal scrollbar instead of squishing all columns.
-    Strips internal _cols; shows only the most diagnostic fields.
-    """
-    COLS = {
-        "מס' פניה":     st.column_config.TextColumn("מס' פניה",    width=90),
-        "תאריך":        st.column_config.TextColumn("תאריך",        width=100),
-        "כתובת ואתר/מוסד": st.column_config.TextColumn("כתובת מקורית", width=200),
-        "רחוב_ראשי":   st.column_config.TextColumn("רחוב",         width=140),
-        "מספר_בית":    st.column_config.TextColumn("מס' בית",      width=80),
-        "סוג_מיקום":   st.column_config.TextColumn("סוג מיקום",    width=100),
-        "geocode_method": st.column_config.TextColumn("שיטת גאוקוד", width=120),
-        "_flag_labels": st.column_config.TextColumn("בעיות",        width=300),
-    }
-    present = [c for c in COLS if c in df.columns]
-    display = df[present].head(max_rows).copy()
-    col_cfg = {c: COLS[c] for c in present}
-    h = min(480, max(80, len(display) * 35 + 42))
-    st.dataframe(_center_style(display), column_config=col_cfg, hide_index=True, height=h)
-    if len(df) > max_rows:
-        st.caption(f"מוצגות {max_rows} שורות ראשונות מתוך {len(df):,}")
+    """Render the flag-detail table (blocking / review rows)."""
+    KEEP = ["מס' פניה", "תאריך", "כתובת ואתר/מוסד", "רחוב_ראשי",
+            "מספר_בית", "סוג_מיקום", "geocode_method", "_flag_labels"]
+    display = df[[c for c in KEEP if c in df.columns]].copy()
+    _table(display, search=True, max_rows=max_rows)
 
 
 def _leaflet_map_html(df: pd.DataFrame, height: int = 400) -> str:
@@ -767,12 +871,7 @@ if stage == "upload":
                     "מס' פניה", "תאריך ושעת פתיחה", "כתובת ואתר/מוסד",
                     "תת נושא", "סטטוס פנייה", "שם מגיש",
                 ] if c in df_raw.columns] or list(df_raw.columns[:6])
-                st.dataframe(
-                    df_raw[_preview_cols].head(5),
-                    hide_index=True,
-                    column_config={c: st.column_config.TextColumn(c, width=160)
-                                   for c in _preview_cols},
-                )
+                _table(df_raw[_preview_cols], max_rows=5)
                 if st.button("▶ התחל עיבוד — נקה נתונים", type="primary", use_container_width=True):
                     with st.spinner("מנקה ומעבד..."):
                         df_clean = run_clean_in_memory(df_raw)
@@ -1106,9 +1205,7 @@ elif stage == "clean":
                      if c in _high_df.columns]
                 ].head(5)
                 st.caption(f"דוגמה — 5 שורות מתוך {n_high:,}:")
-                st.dataframe(_center_style(_h_sample), hide_index=True,
-                             column_config={c: st.column_config.TextColumn(c, width=160)
-                                            for c in _h_sample.columns})
+                _table(_h_sample, max_rows=5)
 
     # ── Partially-classified preview (collapsed, no action needed) ────────
     if n_medium > 0:
@@ -1123,9 +1220,7 @@ elif stage == "clean":
                 _med_df = df[df["_confidence"] == "medium"]
                 _m_cols = [c for c in ["מס' פניה", "תת_נושא_חדש", "אחריות", "רחוב_ראשי"]
                            if c in _med_df.columns]
-                st.caption(f"דוגמה — 5 שורות מתוך {n_medium:,}:")
-                st.dataframe(_center_style(_med_df[_m_cols].head(5)), hide_index=True,
-                             column_config={c: st.column_config.TextColumn(c, width=160) for c in _m_cols})
+                _table(_med_df[_m_cols], max_rows=5, caption=f"דוגמה מתוך {n_medium:,} שורות")
 
     # ════════════════════════════════════════════════════════
     #  TIER D — Structural integrity flags (existing logic)
@@ -1141,17 +1236,11 @@ elif stage == "clean":
         with col_bd1:
             if n_block > 0:
                 st.markdown("**🔴 פירוט בעיות חוסמות:**")
-                _bd_block = _flag_breakdown(flagged, "block")
-                st.dataframe(_center_style(_bd_block), hide_index=True,
-                             column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
-                                            "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
+                _table(_flag_breakdown(flagged, "block"))
         with col_bd2:
             if n_warn > 0:
                 st.markdown("**🟡 פירוט אזהרות:**")
-                _bd_warn = _flag_breakdown(flagged, "warn")
-                st.dataframe(_center_style(_bd_warn), hide_index=True,
-                             column_config={"סוג בעיה": st.column_config.TextColumn("סוג בעיה", width=220),
-                                            "שורות":    st.column_config.NumberColumn("שורות",   width=80)})
+                _table(_flag_breakdown(flagged, "warn"))
 
         if _tsumm["blocking"] > 0:
             with st.expander(f"🔴 חוסמות ({_tsumm['blocking']:,})", expanded=True):
@@ -1684,7 +1773,7 @@ elif stage == "enrich":
 
         zc = df["רובע_פינוי"].value_counts().reset_index()
         zc.columns = ["רובע", "מספר פניות"]
-        st.dataframe(_center_style(zc), use_container_width=True, hide_index=True)
+        _table(zc)
 
         if n_unknown > 0:
             st.markdown(f'<div class="banner-warn">⚠️ {n_unknown} שורות ללא רובע — אלו שורות '
@@ -1858,7 +1947,7 @@ elif stage == "output":
                    .reset_index(name="חזרות").sort_values("חזרות", ascending=False).head(10)
                    .rename(columns={"רחוב_ראשי":"רחוב","מספר_בית":"מס׳ בית","תת_נושא_חדש":"קטגוריה"}))
             if not hot.empty:
-                st.dataframe(_center_style(hot), use_container_width=True, hide_index=True)
+                _table(hot, search=True)
             else:
                 st.caption("אין תלונות חוזרות בפרוסה זו.")
 
@@ -1907,7 +1996,7 @@ elif stage == "output":
                                    max_value=99999, value=42, step=1, key="qa_seed")
         if st.button("▶ הרץ דגימת QA", type="primary", use_container_width=True):
             _qa_result = qs.run_sampling_plan(df, seed=int(_qa_seed) or None)
-            st.dataframe(_center_style(_qa_result), use_container_width=True, hide_index=True)
+            _table(_qa_result, search=True)
             n_reject = int((_qa_result["פסיקה"].str.startswith("❌")).sum())
             if n_reject == 0:
                 st.success("כל הרמות עברו את דגימת ה-QA")
@@ -1942,22 +2031,9 @@ elif stage == "validate":
             c3.metric("רק ביחוס",     f"{result['only_reference']:,}")
 
             st.markdown("#### הסכמה לפי עמודה")
-            st.dataframe(
-                _center_style(result["per_column"].sort_values("אחוז_הסכמה")),
-                hide_index=True,
-                column_config={
-                    "עמודה":       st.column_config.TextColumn("עמודה",          width=160),
-                    "הסכמה":       st.column_config.NumberColumn("הסכמה",         width=80),
-                    "שונה":        st.column_config.NumberColumn("שונה",          width=80),
-                    "חסר_בצינור":  st.column_config.NumberColumn("חסר בצינור",    width=100),
-                    "אחוז_הסכמה":  st.column_config.NumberColumn("% הסכמה",       width=90,
-                                                                  format="%.1f%%"),
-                },
-            )
+            _table(result["per_column"].sort_values("אחוז_הסכמה"))
             with st.expander("📋 פרטי שורות שונות"):
-                _diff_cfg = {c: st.column_config.TextColumn(c, width=140)
-                             for c in result["diff"].columns}
-                st.dataframe(_center_style(result["diff"]), column_config=_diff_cfg, hide_index=True)
+                _table(result["diff"], search=True, max_rows=200)
         except Exception as e:
             st.error(f"שגיאה בהשוואה: {e}")
     elif ref_file is None:
