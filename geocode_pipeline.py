@@ -469,7 +469,8 @@ def nominatim_pass(df: pd.DataFrame,
 
         precision = "none"
         if lat is not None:
-            precision = "address" if place_rank == 30 else "street"
+            is_zero = df.at[idx, "_zero_housenumber"] if "_zero_housenumber" in df.columns else False
+            precision = "street" if is_zero else ("address" if place_rank == 30 else "street")
 
         cache[cache_key] = {"lat": lat, "lon": lon, "precision": precision,
                             "query": matched_query}
@@ -494,6 +495,64 @@ def nominatim_pass(df: pd.DataFrame,
     if progress_cb:
         progress_cb("nominatim", total, total, geocoded, failed)
 
+    return df
+
+
+# ============================================================================
+#  ZERO HOUSE-NUMBER PRE-PASS
+#  A house number of 0 means "the whole street" — always use a street centroid.
+# ============================================================================
+
+def zero_housenumber_pass(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pre-pass: rows where מספר_בית == 0 represent the whole street, not a
+    specific address.  Immediately assign the OSM street centroid (or leave
+    coordinates blank for the later OSM/GIS passes to fill) and force
+    precision = "street" so they can never be up-classified to "address".
+    """
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL,
+                "geocode_query"]:
+        if col not in df.columns:
+            df[col] = None
+
+    if "מספר_בית" not in df.columns:
+        return df
+
+    def _is_zero(val):
+        if pd.isna(val):
+            return False
+        s = str(val).strip()
+        try:
+            return float(s) == 0
+        except ValueError:
+            return False
+
+    zero_mask = df["מספר_בית"].apply(_is_zero)
+    # Only touch rows not yet geocoded
+    needs_coords = df["קו_רוחב"].isna() | (df["קו_רוחב"].astype(str).str.strip() == "")
+    targets = df.index[zero_mask & needs_coords].tolist()
+
+    centroid_hits = 0
+    flagged = 0
+    for idx in targets:
+        street = str(df.at[idx, "רחוב_ראשי"]).strip() if pd.notna(df.at[idx, "רחוב_ראשי"]) else ""
+        if not street or street == "nan":
+            continue
+        # Mark as intentional street-level regardless of whether we have coords yet
+        df.at[idx, PRECISION_COL] = "street"
+        df.at[idx, "_zero_housenumber"] = True  # sentinel for Nominatim pass
+        flagged += 1
+        # Apply OSM centroid immediately if available
+        if street in STREET_COORDS:
+            lat, lon = STREET_COORDS[street]
+            df.at[idx, "קו_רוחב"] = lat
+            df.at[idx, "קו_אורך"] = lon
+            df.at[idx, "geocode_method"] = "street_zero_centroid"
+            df.at[idx, "geocode_query"] = street
+            centroid_hits += 1
+
+    log.info(f"Zero house-number pre-pass: {flagged} street-level rows, "
+             f"{centroid_hits} resolved from OSM centroids")
     return df
 
 
@@ -939,6 +998,9 @@ def geocode_dataframe(df: pd.DataFrame,
     run_id = str(uuid.uuid4())
     df["geocode_run_id"] = run_id
 
+    # Pass 0: Zero house-number pre-pass (house_num==0 → always street centroid)
+    df = zero_housenumber_pass(df)
+
     # Pass 1: Nominatim
     if not skip_nominatim:
         if progress_cb:
@@ -955,6 +1017,10 @@ def geocode_dataframe(df: pd.DataFrame,
         df = gis_rescue_pass(df, progress_cb,
                              checkpoint_cb=checkpoint_cb,
                              checkpoint_every=checkpoint_every)
+
+    # Drop internal sentinel column
+    if "_zero_housenumber" in df.columns:
+        df.drop(columns=["_zero_housenumber"], inplace=True)
 
     # Mark remaining unresolved
     still_missing = df["קו_רוחב"].isna() | (df["קו_רוחב"].astype(str).str.strip() == "")
