@@ -805,17 +805,17 @@ elif stage == "clean":
       <div class="conf-card cc-green">
         <div class="cn">{n_high:,}</div>
         <div class="cl">✅ סווגו אוטומטית</div>
-        <div class="cs">לא נדרשת פעולה</div>
+        <div class="cs">סיווג ואחריות ברורים — לא נדרשת פעולה</div>
       </div>
       <div class="conf-card cc-blue">
         <div class="cn">{n_medium:,}</div>
         <div class="cl">🔵 סווגו בחלקיות</div>
-        <div class="cs">המערכת עשתה את ההערכה הטובה ביותר</div>
+        <div class="cs">הסיווג הטוב ביותר לפי הנתונים הקיימים</div>
       </div>
       <div class="conf-card cc-orange">
         <div class="cn">{n_low:,}</div>
-        <div class="cl">⚠️ לא ניתן לסווג</div>
-        <div class="cs">דורשות קלט ממך או תיקון ב-Excel</div>
+        <div class="cl">🙋 ממתינות לשאלות</div>
+        <div class="cs">המערכת תשאל אותך שאלות ממוקדות למטה</div>
       </div>
       <div class="conf-card cc-gray">
         <div class="cn">{n_block:,}</div>
@@ -824,8 +824,8 @@ elif stage == "clean":
       </div>
     </div>
     <div style="text-align:right;color:#475569;font-size:.84rem;margin-bottom:1rem;">
-      ✅ <strong>{_pct_auto}%</strong> מהשורות ({n_high:,}) סווגו באופן ודאי ואינן דורשות בדיקה.
-      {f"⚠️ <strong>{n_low:,}</strong> שורות דורשות קלט ממך." if n_low > 0 else ""}
+      ✅ <strong>{_pct_auto}%</strong> מהשורות ({n_high:,}) סווגו באופן ודאי.
+      {f"🙋 <strong>{n_low:,}</strong> שורות ייפתרו דרך השאלות למטה." if n_low > 0 else ""}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1086,15 +1086,13 @@ elif stage == "clean":
                              column_config={c: st.column_config.TextColumn(c, width=160)
                                             for c in _h_sample.columns})
 
-    # ── Partially-classified rows ──────────────────────────────────────────
+    # ── Partially-classified preview (collapsed, no action needed) ────────
     if n_medium > 0:
-        with st.expander(f"🔵 סווגו בחלקיות — {n_medium:,} שורות", expanded=False):
+        with st.expander(f"🔵 סווגו בחלקיות — {n_medium:,} שורות (אפשרות עיון בלבד)", expanded=False):
             st.markdown(
                 '<div style="color:#1e3a8a;background:#dbeafe;border-radius:8px;'
                 'padding:.7rem 1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
-                '📋 שורות אלו עובדו על ידי המערכת בצורה הטובה ביותר שיכלה — '
-                'לא הייתה לה גישה לכל המידע, אבל הסיווג הגיוני. '
-                'לא נדרשת פעולה, אלא אם כן אתה רואה שגיאה ברורה.</div>',
+                '📋 הסיווג הגיוני אך לא מלא — לא נדרשת פעולה.</div>',
                 unsafe_allow_html=True,
             )
             if "_confidence" in df.columns:
@@ -1104,27 +1102,6 @@ elif stage == "clean":
                 st.caption(f"דוגמה — 5 שורות מתוך {n_medium:,}:")
                 st.dataframe(_center_style(_med_df[_m_cols].head(5)), hide_index=True,
                              column_config={c: st.column_config.TextColumn(c, width=160) for c in _m_cols})
-
-    # ── Cannot-classify rows ───────────────────────────────────────────────
-    if n_low > 0:
-        with st.expander(f"⚠️ לא ניתן לסווג אוטומטית — {n_low:,} שורות", expanded=(not _has_questions)):
-            st.markdown(
-                '<div style="color:#9a3412;background:#ffedd5;border-radius:8px;'
-                'padding:.7rem 1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
-                '📥 שורות אלו יופיעו בגיליון <strong>"לסקירה ידנית"</strong> בקובץ ה-Excel. '
-                'תקנו אותן ישירות בקובץ, ולאחר מכן העלו אותו חזרה לכאן לבדיקה חוזרת.</div>',
-                unsafe_allow_html=True,
-            )
-            if "_confidence" in df.columns:
-                _low_df = df[df["_confidence"] == "low"]
-                _l_cols = [c for c in ["מס' פניה", "תת נושא מקורי", "כתובת ואתר/מוסד",
-                                       "תת_נושא_חדש", "אחריות"] if c in _low_df.columns]
-                st.caption(f"10 שורות ראשונות מתוך {n_low:,}:")
-                st.dataframe(_center_style(_low_df[_l_cols].head(10)), hide_index=True,
-                             column_config={c: st.column_config.TextColumn(c, width=140) for c in _l_cols})
-    else:
-        st.markdown('<div class="banner-success">✅ כל הפניות סווגו — לא נותרו שורות לבדיקה ידנית!</div>',
-                    unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════
     #  TIER D — Structural integrity flags (existing logic)
@@ -1209,8 +1186,8 @@ elif stage == "clean":
             _low_export = export[[m for m in _low_mask]]
             if any(_low_mask):
                 _low_rows = export.iloc[[i for i, m in enumerate(_low_mask) if m]]
-                _low_rows.to_excel(writer, index=False, sheet_name="לסקירה ידנית")
-                ws2 = writer.sheets["לסקירה ידנית"]
+                _low_rows.to_excel(writer, index=False, sheet_name="נותרו ללא תבנית")
+                ws2 = writer.sheets["נותרו ללא תבנית"]
                 for j, col in enumerate(_low_rows.columns):
                     ws2.write(0, j, col, fmt_hdr)
                 for i in range(len(_low_rows)):
@@ -1235,12 +1212,12 @@ elif stage == "clean":
             _med_cnt  = sum(c == "medium" for c in conf_col)
             _hi_cnt   = sum(c == "high"   for c in conf_col)
             pd.DataFrame([
-                ("סה״כ שורות",          len(export)),
-                ("סווגו ודאית",          _hi_cnt),
-                ("סווגו בחלקיות",        _med_cnt),
-                ("לסקירה ידנית",         _low_cnt),
-                ("שגיאות מבניות",        n_block),
-                ("אזהרות מבניות",        n_warn),
+                ("סה״כ שורות",              len(export)),
+                ("סווגו ודאית",              _hi_cnt),
+                ("סווגו בחלקיות",            _med_cnt),
+                ("נותרו ללא תבנית (Excel)",  _low_cnt),
+                ("שגיאות מבניות",            n_block),
+                ("אזהרות מבניות",            n_warn),
             ], columns=["מדד", "ערך"]).to_excel(writer, index=False, sheet_name="סיכום")
             ws4 = writer.sheets["סיכום"]
             ws4.set_column("A:A", 30); ws4.set_column("B:B", 14)
@@ -1251,8 +1228,9 @@ elif stage == "clean":
 
     base = st.session_state.filename.replace(".xlsx", "")
     _dl_label = (
-        f"📥 הורד קובץ Excel לסקירה — {len(df):,} שורות | "
-        f"{n_high:,} ✅ ודאי | {n_medium:,} 🔵 חלקי | {n_low:,} ⚠️ לבדיקה"
+        f"📥 הורד קובץ Excel — {len(df):,} שורות | "
+        f"{n_high:,} ✅ ודאי | {n_medium:,} 🔵 חלקי"
+        + (f" | {n_low:,} 📎 ללא תבנית" if n_low > 0 else "")
     )
     st.download_button(
         label=_dl_label,
