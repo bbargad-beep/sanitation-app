@@ -494,8 +494,11 @@ def _tip(html_content: str) -> str:
 
 def _find_street_variants(df: pd.DataFrame) -> list:
     """
-    Find street names in the data that have variant spellings or differ from the
-    canonical form in the municipal street registry (imported from geocode_pipeline).
+    Find street names whose raw forms differ in spelling (not just whitespace/numbers).
+
+    Groups raw forms by their normalized key. A group is shown only when there
+    are genuinely different spellings — trailing spaces and appended house numbers
+    are NOT considered different spellings.
 
     Returns list of:
       {"canonical": str, "total": int, "variants": [{"raw": str, "count": int}],
@@ -504,43 +507,54 @@ def _find_street_variants(df: pd.DataFrame) -> list:
     """
     try:
         import re as _re
+        import unicodedata as _ud
         from collections import defaultdict as _dd
         import geocode_pipeline as _gp
 
-        _prefix = _re.compile(r"^(רחוב|רח[׳']|ר[׳']|ה?רחוב)\s+", _re.UNICODE)
-        _suffix = _re.compile(r"\s*([,\.;]|\d{1,5}|ת\.א|ת\.ל)\s*$", _re.UNICODE)
+        _prefix = _re.compile(r"^(רחוב|רח[׳'״]|ר[׳'״]|ה?רחוב)\s+", _re.UNICODE)
+        # Strip trailing: punctuation, house numbers (standalone digits), postal codes
+        _suffix = _re.compile(r"(\s+\d{1,5}|[,\.;]\s*\d*|ת\.א|ת\.ל)\s*$", _re.UNICODE)
 
-        def _norm(s: str) -> str:
+        def _clean_raw(s: str) -> str:
+            """Normalize a raw street value for deduplication: strip spaces + house numbers."""
             s = str(s).strip()
             s = _prefix.sub("", s)
             s = _suffix.sub("", s)
             return s.strip()
 
+        def _norm_key(s: str) -> str:
+            """Additional normalization for grouping: NFC unicode so ״ variants collapse."""
+            s = _clean_raw(s)
+            return _ud.normalize("NFC", s)
+
         streets = df["רחוב_ראשי"].dropna().astype(str) if "רחוב_ראשי" in df.columns else pd.Series(dtype=str)
         streets = streets[streets.str.strip() != ""]
 
-        raw_counts: dict = {}
+        # Count occurrences of each cleaned raw form (deduplicates trailing-space variants)
+        cleaned_counts: dict = {}
         for raw in streets:
-            raw_counts[raw] = raw_counts.get(raw, 0) + 1
+            cleaned = _clean_raw(raw)
+            if cleaned:
+                cleaned_counts[cleaned] = cleaned_counts.get(cleaned, 0) + 1
 
-        # Group raw → normalized
+        # Group cleaned → normalized-key
         norm_groups: dict = _dd(lambda: _dd(int))
-        for raw, cnt in raw_counts.items():
-            norm_groups[_norm(raw)][raw] += cnt
+        for cleaned, cnt in cleaned_counts.items():
+            norm_groups[_norm_key(cleaned)][cleaned] += cnt
 
         results = []
-        for norm_key, raw_cnt_map in norm_groups.items():
-            total = sum(raw_cnt_map.values())
+        for norm_key, cleaned_cnt_map in norm_groups.items():
+            total = sum(cleaned_cnt_map.values())
             if total < 5:
                 continue
-            # Only show groups with >1 distinct spelling OR whose canonical differs from raw
-            all_raws = sorted(raw_cnt_map, key=lambda k: -raw_cnt_map[k])
-            canonical = all_raws[0]  # most common raw form
-            variants = [{"raw": r, "count": raw_cnt_map[r]} for r in all_raws[1:] if raw_cnt_map[r] >= 2]
+            all_cleaned = sorted(cleaned_cnt_map, key=lambda k: -cleaned_cnt_map[k])
+            canonical = all_cleaned[0]
+            # Variants are forms that differ in actual spelling (not just whitespace/numbers)
+            variants = [{"raw": r, "count": cleaned_cnt_map[r]} for r in all_cleaned[1:] if cleaned_cnt_map[r] >= 2]
 
-            # Check registry
+            # Check registry for canonical spelling
             reg_canon, _ = _gp._registry_resolve(norm_key)
-            if reg_canon is None and len(all_raws) > 1:
+            if reg_canon is None:
                 reg_canon, _ = _gp._registry_resolve(canonical)
 
             if variants or (reg_canon and reg_canon != canonical):
@@ -879,48 +893,80 @@ elif stage == "clean":
                 if _ans != "השאר לבדיקה ב-Excel":
                     _qa_answers[f"subtopic:{_sub}"] = _ans
 
-        # ── Type 2: Unresolved responsibility (with description samples) ──
+        # ── Type 2: Unresolved responsibility — per sub-group questions ──
         if _clusters["unresolved_resp"]:
             st.markdown(
                 f'**📋 קטגוריות שלא ברור מי אחראי לטיפול** {_TIP_RESP}',
                 unsafe_allow_html=True,
             )
+            _RESP_COLORS = {
+                "כשל עירוני":      ("#eff6ff", "#3b82f6"),
+                "התנהגות אזרח":   ("#fff7ed", "#fb923c"),
+                "טבעי":            ("#f0fdf4", "#4ade80"),
+                "לא רלוונטי":     ("#f1f5f9", "#94a3b8"),
+            }
+            _RESP_HELP = (
+                "כשל עירוני — העירייה לא ביצעה את עבודתה\n"
+                "התנהגות אזרח — אזרח גרם לבעיה בהתנהגותו\n"
+                "טבעי — גשם, רוח, ציפורים, בעלי חיים\n"
+                "לא רלוונטי — בקשות שירות, תביעות\n\n"
+                "אם לא ניתן לתת תשובה אחת — השאר כ-'לא ידוע'"
+            )
             for _cl in _clusters["unresolved_resp"]:
-                _cat  = _cl["category"]
-                _cnt  = _cl["count"]
-                _smpl = _cl.get("desc_samples", [])
-                _samples_html = ""
-                if _smpl:
-                    _samples_html = (
-                        '<br><small style="color:#78716c;font-size:.79rem;">'
-                        '<em>דוגמאות מהתיאורים (כדי שתוכל לשפוט):</em><br>'
-                        + "<br>".join(f"• {s}" for s in _smpl)
-                        + "</small>"
-                    )
-                st.markdown(
-                    f'<div style="background:#fff7ed;border-right:3px solid #fb923c;'
-                    f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
-                    f'<strong>"{_cat}"</strong> — {_cnt:,} פניות ללא סיווג אחריות'
-                    f'{_samples_html}'
-                    f'<br><small style="color:#9a3412;font-size:.78rem;">⚠️ שים לב: הפניות בקטגוריה זו עשויות להיות מסיבות שונות. '
-                    f'אם לא ניתן לתת תשובה אחת לכולן — השאר כ-"לא ידוע".</small>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                _resp_opts = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
-                _ans = st.selectbox(
-                    f'מי אחראי לטיפול ב"{_cat}"?',
-                    _resp_opts, key=f"qa_resp_{_cat}",
-                    help=(
-                        "כשל עירוני — העירייה לא ביצעה את עבודתה\n"
-                        "התנהגות אזרח — אזרח גרם לבעיה\n"
-                        "טבעי — גשם, רוח, ציפורים, בעלי חיים\n"
-                        "לא רלוונטי — בקשות שירות, תביעות\n\n"
-                        "⚠️ אם הפניות מגוונות ואין תשובה אחת — השאר כ-'לא ידוע'"
-                    ),
-                )
-                if _ans != "השאר כ-לא ידוע":
-                    _qa_answers[f"resp:{_cat}"] = _ans
+                _cat        = _cl["category"]
+                _total      = _cl["total"]
+                _sub_groups = _cl.get("sub_groups", [])
+                _unmatched  = _cl.get("unmatched_count", 0)
+
+                with st.expander(f'📂 "{_cat}" — {_total:,} פניות', expanded=True):
+                    for _sg in _sub_groups:
+                        _resp      = _sg["resp"]
+                        _sg_cnt    = _sg["count"]
+                        _kws       = _sg.get("trigger_keywords", [])
+                        _sg_smpl   = _sg.get("desc_samples", [])
+                        _bg, _brd  = _RESP_COLORS.get(_resp, ("#fafafa", "#94a3b8"))
+                        _kw_str    = "، ".join(_kws[:5]) if _kws else ""
+                        _smpl_html = ""
+                        if _sg_smpl:
+                            _smpl_html = (
+                                '<br><small style="color:#78716c;font-size:.79rem;">'
+                                + "<br>".join(f"• {s}" for s in _sg_smpl) + "</small>"
+                            )
+                        st.markdown(
+                            f'<div style="background:{_bg};border-right:3px solid {_brd};'
+                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.45rem 0 .15rem;">'
+                            f'<strong>{_resp}</strong> — {_sg_cnt:,} פניות'
+                            f'{"<br><small style=color:#64748b;font-size:.79rem>מילות מפתח: " + _kw_str + "</small>" if _kw_str else ""}'
+                            f'{_smpl_html}'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        _resp_opts_sg = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
+                        _sg_key = f"qa_rsub_{_cat}_{_resp}"
+                        _ans_sg = st.selectbox(
+                            f'מי אחראי לפניות מסוג "{_resp}" ב"{_cat}"?',
+                            _resp_opts_sg, key=_sg_key, help=_RESP_HELP,
+                        )
+                        if _ans_sg != "השאר כ-לא ידוע":
+                            _qa_answers[f"resp_sub:{_cat}:{_resp}"] = _ans_sg
+
+                    if _unmatched > 0:
+                        st.markdown(
+                            f'<div style="background:#fafafa;border-right:3px solid #94a3b8;'
+                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.45rem 0 .15rem;">'
+                            f'<strong>פניות שלא תאמו אף קבוצה</strong> — {_unmatched:,} פניות'
+                            f'<br><small style="color:#64748b;font-size:.79rem;">פניות אלו לא הכילו מילות מפתח שמזהות את הסיבה.</small>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        _resp_opts_um = ["השאר כ-לא ידוע"] + cp.KNOWN_RESPONSIBILITIES
+                        _um_key = f"qa_runm_{_cat}"
+                        _ans_um = st.selectbox(
+                            f'מי אחראי לשאר הפניות ב"{_cat}" (ללא מילות מפתח)?',
+                            _resp_opts_um, key=_um_key, help=_RESP_HELP,
+                        )
+                        if _ans_um != "השאר כ-לא ידוע":
+                            _qa_answers[f"resp_unmatched:{_cat}"] = _ans_um
 
         # ── Type 3: Street name variants ──────────────────────────────────
         if _st_vars:
@@ -956,15 +1002,24 @@ elif stage == "clean":
                     f'</div>',
                     unsafe_allow_html=True,
                 )
-                # Build variant options: each raw form that appears
-                _all_raws_for_street = [_can] + [v["raw"] for v in _vars]
+                # Build variant options: deduplicated cleaned forms only
+                _all_forms = list(dict.fromkeys([_can] + [v["raw"] for v in _vars]))
+                _seen = set()
+                _deduped = []
+                for _f in _all_forms:
+                    _fk = _f.strip()
+                    if _fk not in _seen:
+                        _seen.add(_fk)
+                        _deduped.append(_f)
                 _street_opts = ["השאר כמו שיש"] + (
-                    [_reg] if _reg and _reg not in _all_raws_for_street else []
-                ) + _all_raws_for_street
+                    [_reg] if _reg and _reg not in _deduped else []
+                ) + _deduped
+                # Remove duplicate entries in the option list
+                _street_opts = list(dict.fromkeys(_street_opts))
                 _ans = st.selectbox(
                     f'מה הכתיב הנכון של "{_can}"?',
                     _street_opts, key=f"qa_street_{_can}",
-                    index=1 if _reg and _reg not in _all_raws_for_street else 0,
+                    index=1 if _reg and _reg not in _deduped else 0,
                     help=(
                         "בחר את הכתיב הרשמי לאחר בדיקה ב-GIS העירוני.\n"
                         "כל הפניות עם כתיב שונה יועברו לכתיב שתבחר.\n"
@@ -973,7 +1028,7 @@ elif stage == "clean":
                 )
                 if _ans != "השאר כמו שיש" and _ans != _can:
                     # Apply to all variant raw forms in this group
-                    for _raw_v in _all_raws_for_street:
+                    for _raw_v in _deduped:
                         if _raw_v != _ans:
                             _qa_answers[f"street:{_raw_v}"] = _ans
 
