@@ -930,18 +930,15 @@ elif stage == "clean":
             )
             _RESP_OPTS = ["— השאר כלא ידוע —"] + cp.KNOWN_RESPONSIBILITIES
 
-            def _resp_index(guess):
-                return _RESP_OPTS.index(guess) if guess in _RESP_OPTS else 0
-
             for _cl in _clusters["unresolved_resp"]:
                 _cat      = _cl["category"]
                 _unres    = _cl.get("unresolved", 0)
                 _pgroups  = _cl.get("pattern_groups", [])
                 _remain   = _cl.get("remainder", 0)
-                _guess    = _cl.get("default_guess")
+                _rem_smpl = _cl.get("remainder_samples", [])
 
                 with st.expander(f'📂 "{_cat}" — {_unres:,} פניות ללא סיווג אחריות', expanded=True):
-                    # One question per data-discovered word (answerable + specific)
+                    # One question per data-discovered phrase/word
                     for _pg in _pgroups:
                         _obs    = _pg["observation"]
                         _pg_cnt = _pg["count"]
@@ -950,7 +947,7 @@ elif stage == "clean":
                         if _smpl:
                             _smpl_html = (
                                 '<br><small style="color:#78716c;font-size:.79rem;">'
-                                '<em>דוגמאות:</em><br>'
+                                '<em>דוגמאות מהפניות:</em><br>'
                                 + "<br>".join(f"• {s}" for s in _smpl) + "</small>"
                             )
                         st.markdown(
@@ -968,27 +965,25 @@ elif stage == "clean":
                         if _ans_pg != _RESP_OPTS[0]:
                             _qa_answers[f"resp_term:{_cat}:{_obs}"] = _ans_pg
 
-                    # A single default question for everything else in the category
+                    # Remainder: show samples + count as info, no question asked.
+                    # No unanswerable "default" question — these go to Excel.
                     if _remain > 0:
-                        _guess_note = (
-                            f'<br><small style="color:#065f46;font-size:.78rem;">'
-                            f'💡 הצעה לפי פניות דומות שכבר סווגו: <strong>{_guess}</strong></small>'
-                        ) if _guess else ""
+                        _rem_smpl_html = ""
+                        if _rem_smpl:
+                            _rem_smpl_html = (
+                                '<br><small style="color:#78716c;font-size:.78rem;">'
+                                '<em>דוגמאות מהפניות שנותרו:</em><br>'
+                                + "<br>".join(f"• {s}" for s in _rem_smpl) + "</small>"
+                            )
                         st.markdown(
-                            f'<div style="background:#fafafa;border-right:3px solid #94a3b8;'
-                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.6rem 0 .15rem;">'
-                            f'<strong>שאר הפניות ב"{_cat}"</strong> — {_remain:,} פניות'
-                            f'{_guess_note}'
+                            f'<div style="background:#fafaf5;border:1px dashed #cbd5e1;'
+                            f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.6rem 0 .2rem;">'
+                            f'<strong>📎 {_remain:,} פניות נוספות ב"{_cat}"</strong> — '
+                            f'לא נמצאה תבנית חוזרת. יועברו לבדיקה ב-Excel.'
+                            f'{_rem_smpl_html}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-                        _ans_def = st.selectbox(
-                            f'מהי ברירת המחדל לאחריות בשאר הפניות ב"{_cat}"?',
-                            _RESP_OPTS, key=f"qa_rdef_{_cat}",
-                            index=_resp_index(_guess), help=_RESP_HELP,
-                        )
-                        if _ans_def != _RESP_OPTS[0]:
-                            _qa_answers[f"resp_default:{_cat}"] = _ans_def
 
         # ── Type 3: Street name variants ──────────────────────────────────
         if _st_vars:

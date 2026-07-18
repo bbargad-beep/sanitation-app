@@ -622,39 +622,82 @@ def _tokenize_heb(text) -> list:
     return [t for t in toks if t not in _HEB_STOPWORDS]
 
 
-def _discover_patterns(desc_list: list, min_count: int = 5, max_groups: int = 4):
-    """
-    Data-driven pattern discovery: find the content words that recur most often
-    across a set of free-text descriptions, and form one answerable group per
-    recurring word. This lets the app generate its OWN questions ("calls that
-    mention X — who is responsible?") instead of relying only on a fixed
-    keyword list.
+def _ngrams_heb(text, n=2) -> list:
+    """Return consecutive n-grams of Hebrew content tokens from text."""
+    toks = _tokenize_heb(text)
+    return [" ".join(toks[i:i+n]) for i in range(len(toks)-n+1)]
 
-    Returns (groups, used_row_positions) where groups is a list of
-    {"term": str, "count": int, "row_idxs": [positions into desc_list]} and
-    groups are made disjoint (each row assigned to its strongest term) so the
-    reviewer never answers about the same call twice.
+
+def _discover_patterns(desc_list: list, min_count: int = 3, max_groups: int = 12):
+    """
+    Data-driven pattern discovery — iteratively extracts the most informative
+    recurring phrases from free-text descriptions.
+
+    Design improvements over the previous version:
+    • Bigrams are scored first — "ריח רע" is more answerable than "ריח" alone.
+      A bigram that recurs ≥ min_count beats any unigram that overlaps it.
+    • Iterative extraction with remainder re-scan: after each group is formed,
+      we re-score the remaining rows so that per-term counts reflect what's
+      actually left unaccounted for, not the global totals.
+    • Low, adaptive min_count (caller controls): for 100-row pools we want
+      groups of ≥3; for 1000-row pools we want ≥8 but not a fixed /50 divisor.
+    • No hard disjoint assignment for scoring — we score globally, then greedily
+      assign in order so each row ends up in exactly one group. This prevents
+      the "popular word steals rare rows" problem.
+
+    Returns (groups, used_row_set) where each group is:
+      {"term": str, "count": int, "row_idxs": [positions into desc_list]}
     """
     from collections import Counter
-    counts: Counter = Counter()
-    per_term_rows: dict = {}
+
+    # Build bigram index first (scored higher)
+    bi_rows: dict = {}
+    for i, d in enumerate(desc_list):
+        for bg in set(_ngrams_heb(d, 2)):
+            bi_rows.setdefault(bg, []).append(i)
+
+    # Build unigram index
+    uni_rows: dict = {}
     for i, d in enumerate(desc_list):
         for t in set(_tokenize_heb(d)):
-            counts[t] += 1
-            per_term_rows.setdefault(t, []).append(i)
+            uni_rows.setdefault(t, []).append(i)
 
-    groups = []
+    # Score: bigrams first (only those that beat a unigram candidate), then unigrams
+    # A bigram "A B" supersedes "A" and "B" unigrams when it appears ≥ min_count
+    bi_counts = Counter({bg: len(rows) for bg, rows in bi_rows.items()})
+    uni_counts = Counter({t: len(rows) for t, rows in uni_rows.items()})
+
+    # Merge into a scored candidate list: bigrams first, then unigrams not already
+    # covered by a bigram word-component
+    candidates: list = []  # (score, term, row_idxs)
+    covered_by_bigram: set = set()
+    for bg, cnt in bi_counts.most_common():
+        if cnt >= min_count:
+            candidates.append((cnt * 2, bg, bi_rows[bg]))  # *2 to rank above unigrams
+            for word in bg.split():
+                covered_by_bigram.add(word)
+
+    for t, cnt in uni_counts.most_common():
+        if cnt >= min_count and t not in covered_by_bigram:
+            candidates.append((cnt, t, uni_rows[t]))
+
+    # Sort descending by score
+    candidates.sort(key=lambda x: -x[0])
+
+    # Iterative greedy extraction: pick the best term, form a group from its
+    # unassigned rows, then re-score remaining candidates against what's left
+    groups: list = []
     used: set = set()
-    for term, _cnt in counts.most_common():
-        if _cnt < min_count:
-            break
-        rows = [i for i in per_term_rows[term] if i not in used]
-        if len(rows) < min_count:
-            continue
-        groups.append({"term": term, "count": len(rows), "row_idxs": rows})
-        used.update(rows)
+
+    for _score, term, all_row_idxs in candidates:
         if len(groups) >= max_groups:
             break
+        avail = [i for i in all_row_idxs if i not in used]
+        if len(avail) < min_count:
+            continue
+        groups.append({"term": term, "count": len(avail), "row_idxs": avail})
+        used.update(avail)
+
     return groups, used
 
 
@@ -719,40 +762,63 @@ def find_clusters(df: pd.DataFrame) -> dict:
                 continue
 
             desc_list = unresolved["תיאור"].fillna("").astype(str).tolist()
-            min_count = max(5, len(unresolved) // 50)
-            groups, used = _discover_patterns(desc_list, min_count=min_count, max_groups=4)
 
-            pattern_groups = []
-            for g in groups:
+            # ── Two-pass pattern extraction ──────────────────────────────────
+            # Pass 1: aggressive first sweep. Low min_count so small signals
+            # surface. Up to 12 groups from this pass.
+            min1 = max(3, len(unresolved) // 80)
+            groups1, used1 = _discover_patterns(desc_list, min_count=min1, max_groups=12)
+
+            # Pass 2: run again on the REMAINDER rows only. Often a second
+            # cluster emerges once the dominant terms are removed.
+            remainder_idxs = [i for i in range(len(desc_list)) if i not in used1]
+            groups2: list = []
+            used2: set = set()
+            if len(remainder_idxs) >= 10:
+                rem_descs = [desc_list[i] for i in remainder_idxs]
+                min2 = max(3, len(rem_descs) // 40)
+                raw2, used_rel = _discover_patterns(rem_descs, min_count=min2, max_groups=6)
+                # Remap relative indices back to original desc_list positions
+                idx_map = {j: remainder_idxs[j] for j in range(len(remainder_idxs))}
+                for g in raw2:
+                    orig_idxs = [idx_map[j] for j in g["row_idxs"]]
+                    groups2.append({"term": g["term"], "count": len(orig_idxs),
+                                    "row_idxs": orig_idxs})
+                used2 = {idx_map[j] for j in used_rel}
+
+            all_groups = groups1 + groups2
+            all_used = used1 | used2
+
+            def _make_pg(g):
                 pool = [desc_list[i] for i in g["row_idxs"] if desc_list[i].strip()]
-                samp_idx = _rng.sample(range(len(pool)), min(2, len(pool))) if pool else []
-                samples = [pool[i][:120] for i in samp_idx]
-                pattern_groups.append({
+                samp = _rng.sample(pool, min(3, len(pool))) if pool else []
+                return {
                     "observation":  g["term"],
                     "count":        g["count"],
-                    "desc_samples": samples,
-                })
+                    "desc_samples": [s[:130] for s in samp],
+                }
 
-            remainder = len(unresolved) - len(used)
+            pattern_groups = [_make_pg(g) for g in all_groups]
 
-            # Soft default suggestion = the responsibility most common among the
-            # rows in this category that WERE resolved automatically.
-            default_guess = None
-            if has_src:
-                resolved = cat_rows[cat_rows["אחריות_מקור"] != "unresolved"]
-                if len(resolved):
-                    vc = resolved["אחריות"].value_counts()
-                    vc = vc[~vc.index.isin(["א.מ.ל"])]
-                    if len(vc):
-                        default_guess = str(vc.index[0])
+            # Only keep a "remainder" entry if it's small enough to be meaningful
+            # as a single catch-all. If it's large, surface samples so the reviewer
+            # can see what's left — but don't pretend a single answer covers it.
+            true_remainder = len(unresolved) - len(all_used)
+            remainder_samples: list = []
+            if true_remainder > 0:
+                rem_pool = [desc_list[i] for i in range(len(desc_list))
+                            if i not in all_used and desc_list[i].strip()]
+                if rem_pool:
+                    remainder_samples = _rng.sample(rem_pool, min(4, len(rem_pool)))
+                    remainder_samples = [s[:130] for s in remainder_samples]
 
             clusters["unresolved_resp"].append({
-                "category":       cat,
-                "total":          len(cat_rows),
-                "unresolved":     len(unresolved),
-                "pattern_groups": pattern_groups,
-                "remainder":      remainder,
-                "default_guess":  default_guess,
+                "category":        cat,
+                "total":           len(cat_rows),
+                "unresolved":      len(unresolved),
+                "pattern_groups":  pattern_groups,
+                "remainder":       true_remainder,
+                "remainder_samples": remainder_samples,
             })
 
         clusters["unresolved_resp"].sort(key=lambda x: -x["unresolved"])
