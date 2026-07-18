@@ -645,7 +645,7 @@ def _style_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 
     for col in df.columns:
         if col in ("אחריות", "_confidence", "_flag_severity", "_flag_labels"):
-            styled = styled.applymap(lambda v, c=col: _cell_color(v, c), subset=[col])
+            styled = styled.map(lambda v, c=col: _cell_color(v, c), subset=[col])
 
     return styled
 
