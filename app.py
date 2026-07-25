@@ -24,7 +24,12 @@ st.set_page_config(
 )
 
 # ── Import pipeline modules ─────────────────────────────────────────────────
+import importlib
 sys.path.insert(0, ".")
+# Force-evict any stale cached module from a prior Streamlit Cloud deploy
+for _mod in ("clean_pipeline", "geocode_pipeline", "enrich_pipeline",
+             "flags", "heatmap", "audit_log"):
+    sys.modules.pop(_mod, None)
 _IMPORT_ERR = None
 try:
     import clean_pipeline as cp
