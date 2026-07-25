@@ -622,7 +622,7 @@ _COL_LABELS = {
     "אחריות": "אחריות", "רחוב_ראשי": "רחוב", "מספר_בית": "מס׳ בית",
     "סוג_מיקום": "סוג מיקום", "geocode_method": "גאוקוד",
     "_flag_labels": "בעיות", "_confidence": "ביטחון",
-    "כתובת ואתר/מוסד": "כתובת מקורית", "תת נושא מקורי": "נושא מקורי",
+    "כתובת ואתר/מוסד": "כתובת מקורית", "תת נושא": "נושא מקורי",
     "תיאור": "תיאור", "סוג בעיה": "סוג בעיה", "שורות": "שורות",
     "רובע": "רובע", "מספר פניות": "מספר פניות",
     "רחוב": "רחוב", "מס׳ בית": "מס׳ בית", "קטגוריה": "קטגוריה",
@@ -1058,16 +1058,18 @@ elif stage == "clean":
             street     = _g("רחוב_ראשי")
             house      = _g("מספר_בית")
             desc       = _g("תיאור")[:80]
-            orig_topic = _g("נושא ראשי")
-            orig_sub   = _g("תת נושא מקורי") or _g("תת נושא")
+            orig_topic = _g("נושא")
+            orig_sub   = _g("תת נושא")
             new_cat    = _g("תת_נושא_חדש")
             cat_src    = _g("סיווג_מקור")
             resp       = _g("אחריות")
             resp_src   = _g("אחריות_מקור")
             raw_addr   = _g("כתובת ואתר/מוסד")
             addr_route = _g("מסלול_כתובת")
-            status     = _g("סטטוס")
-            date_col   = _g("תאריך פתיחה") or _g("תאריך")
+            status     = _g("סטטוס פנייה")
+            date_col   = _g("תאריך")
+            substance  = _g("חומר")
+            asset      = _g("נכס")
 
             has_cat  = bool(orig_sub and new_cat and orig_sub != new_cat and cat_src == "map")
             has_resp = (resp_src in ("map",) and resp not in ("א.מ.ל", "")) or \
@@ -1081,8 +1083,10 @@ elif stage == "clean":
             _base = {
                 "מס' פניה":    ticket,
                 "תאריך":       date_col,
-                "נושא ראשי":   orig_topic,
+                "נושא":        orig_topic,
                 "תת נושא":     orig_sub,
+                "חומר":        substance,
+                "נכס":         asset,
                 "רחוב":        street,
                 "בית":         house,
                 "סטטוס":       status,
@@ -1120,7 +1124,7 @@ elif stage == "clean":
                     "שיטת סיווג":     route_labels.get(addr_route, addr_route),
                 })
 
-        cols = ["מס' פניה", "תאריך", "נושא ראשי", "תת נושא",
+        cols = ["מס' פניה", "תאריך", "נושא", "תת נושא", "חומר", "נכס",
                 "רחוב", "בית", "סטטוס", "תיאור",
                 "סוג תיקון", "ערך לפני", "ערך אחרי", "שיטת סיווג"]
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
@@ -1183,7 +1187,7 @@ elif stage == "clean":
                     _rtl_df,
                     gridOptions=_gb.build(),
                     height=560,
-                    update_mode=GridUpdateMode.SELECTION_CHANGED,
+                    update_mode=GridUpdateMode.NO_UPDATE,
                     allow_unsafe_jscode=False,
                     key="_corr_aggrid",
                 )

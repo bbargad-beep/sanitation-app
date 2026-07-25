@@ -554,7 +554,9 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
         overall_conf = min([cat_conf, resp_conf, addr_conf], key=lambda x: _tier[x])
 
         rows.append({
-            "מס' פניה": clean_id, "תאריך": date, "שעה": hour, "יום": weekday, "חודש": month,
+            "מס' פניה": clean_id,
+            "תאריך ושעת פתיחה": r.get("תאריך ושעת פתיחה"),
+            "תאריך": date, "שעה": hour, "יום_בשבוע": weekday, "חודש": month,
             "סטטוס פנייה": r.get("סטטוס פנייה"), "נושא": r.get("נושא"),
             "תת_נושא_חדש": new_cat, "חומר": substance, "אחריות": resp, "נכס": asset,
             "רחוב_ראשי": loc["רחוב_ראשי"], "רחוב_משני": loc["רחוב_משני"],
@@ -564,7 +566,7 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
             "מידע_אישי": detect_personal_info(r.get("תיאור")), "סיומת_פניה": suffix,
             "כתובת ואתר/מוסד": r.get("כתובת ואתר/מוסד"), "רחוב": loc["רחוב"],
             "הערת_כתובת": loc["הערת_כתובת"], "מחלקה": r.get("מחלקה"),
-            "תת נושא מקורי": orig_sub, "מספר_חזרה": None,
+            "תת נושא": orig_sub, "מספר_חזרה": None,
             "סיווג_מקור": cat_source, "אחריות_מקור": resp_source, "מסלול_כתובת": addr_route,
             "תוקן_אוטומטית": False,
             "_confidence": overall_conf,
@@ -837,9 +839,9 @@ def find_clusters(df: pd.DataFrame) -> dict:
     """
     clusters: dict = {"unknown_subtopics": [], "unresolved_resp": []}
 
-    if "סיווג_מקור" in df.columns and "תת נושא מקורי" in df.columns:
+    if "סיווג_מקור" in df.columns and "תת נושא" in df.columns:
         passthrough = df[df["סיווג_מקור"] == "passthrough"]
-        for val, grp in passthrough.groupby("תת נושא מקורי"):
+        for val, grp in passthrough.groupby("תת נושא"):
             val_str = str(val).strip()
             if val_str and val_str not in ("nan", "None", ""):
                 examples = [
@@ -971,8 +973,8 @@ def apply_user_answers(df: pd.DataFrame, answers: dict) -> pd.DataFrame:
 
         if key.startswith("subtopic:"):
             orig_sub = key[len("subtopic:"):]
-            if "תת נושא מקורי" in df.columns:
-                mask = df["תת נושא מקורי"] == orig_sub
+            if "תת נושא" in df.columns:
+                mask = df["תת נושא"] == orig_sub
                 if mask.any():
                     df.loc[mask, "תת_נושא_חדש"] = answer
                     df.loc[mask, "סיווג_מקור"] = "user_map"
