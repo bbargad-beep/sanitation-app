@@ -939,6 +939,21 @@ elif stage == "clean":
 
     st.markdown("### שלב 2 — ניקוי: סקירת תיקונים ועדכון ידני")
 
+    # ── Section anchors for in-page navigation ───────────────────────────────
+    st.markdown(
+        '<div style="display:flex;flex-direction:row-reverse;gap:.6rem;margin-bottom:1rem;">'
+        '<a href="#section-summary" style="text-decoration:none;background:#e0f2fe;border:1px solid #7dd3fc;'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#0369a1;">📊 סיכום</a>'
+        '<a href="#section-corrections" style="text-decoration:none;background:#f0fdf4;border:1px solid #86efac;'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#166534;">📋 יומן תיקונים</a>'
+        '<a href="#section-qa" style="text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#1e40af;">🙋 שאלות</a>'
+        '<a href="#section-download" style="text-decoration:none;background:#f8fafc;border:1px solid #e2e8f0;'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#475569;">📤 הורדה</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── Success banner after Q&A apply ────────────────────────────────────────
     if st.session_state.pop("_qa_applied", False):
         st.success(
@@ -948,7 +963,29 @@ elif stage == "clean":
             icon="✅",
         )
 
+    # ── Undo last Q&A apply ─────────────────────────────────────────────────
+    if st.session_state.get("_df_before_qa") is not None:
+        if st.button("↩️ בטל את התשובות האחרונות שהוחלו", key="_undo_qa"):
+            st.session_state.df = st.session_state.pop("_df_before_qa")
+            df = st.session_state.df
+            st.session_state.pop("_context_resolved", None)
+            st.rerun()
+
+    # ── Count correction types for summary breakdown ─────────────────────────
+    _n_cat_corrections = 0
+    _n_resp_corrections = 0
+    if "סיווג_מקור" in df.columns:
+        _n_cat_corrections = int((df["סיווג_מקור"] == "map").sum())
+    if "אחריות_מקור" in df.columns:
+        _resp_src_col = df["אחריות_מקור"].astype(str)
+        _n_resp_corrections = int(
+            (_resp_src_col == "map").sum() +
+            _resp_src_col.str.startswith("keyword:").sum() +
+            (_resp_src_col == "context_resolve").sum()
+        )
+
     # ── Summary cards (3 cards: auto-processed, awaiting input, structural) ─
+    st.markdown('<div id="section-summary"></div>', unsafe_allow_html=True)
     _pct_auto = round(n_auto / len(df) * 100) if len(df) else 0
     st.markdown(f"""
     <style>
@@ -969,7 +1006,7 @@ elif stage == "clean":
       <div class="conf-card cc-green">
         <div class="cn">{n_auto:,}</div>
         <div class="cl">✅ עובדו אוטומטית</div>
-        <div class="cs">ראו יומן תיקונים למטה לעיון ותיקון</div>
+        <div class="cs">{_n_cat_corrections:,} קטגוריה · {_n_resp_corrections:,} אחריות</div>
       </div>
       <div class="conf-card cc-orange">
         <div class="cn">{n_low:,}</div>
@@ -992,12 +1029,18 @@ elif stage == "clean":
     #  CORRECTION LOG — transparent view of all auto-changes
     # ════════════════════════════════════════════════════════
 
+    _SOURCE_LABELS = {
+        "map": "מילון מיפוי",
+        "context_resolve": "הקשר אוטומטי",
+        "user_override": "תיקון ידני",
+        "user_qa": "תשובת משתמש",
+        "user_resp_term": "תשובת משתמש",
+        "user_resp_default": "תשובת משתמש (ברירת מחדל)",
+        "manual_review": "סימון לבדיקה",
+    }
+
     def _build_correction_log(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        One row per ticket. Each correction type gets its own before/after columns.
-        Includes key context columns (street, house, description) so the user can
-        read everything without cross-referencing another table.
-        """
+        """One row per correction. Includes type, method, and original CRM context."""
         route_labels = {"std": "כתובת", "intersection": "צומת",
                         "range": "טווח", "apt_suffix": "סיומת דירה",
                         "multi": "מרובה", "landmark": "ציון דרך"}
@@ -1006,88 +1049,100 @@ elif stage == "clean":
         for row in df.itertuples(index=False, name=None):
             def _g(col, default=""):
                 i = _col.get(col)
-                return str(row[i]).strip() if i is not None else default
+                if i is None:
+                    return default
+                v = row[i]
+                return str(v).strip() if pd.notna(v) else default
 
             ticket     = _g("מס' פניה")
             street     = _g("רחוב_ראשי")
             house      = _g("מספר_בית")
             desc       = _g("תיאור")[:80]
-            orig_sub   = _g("תת נושא מקורי")
+            orig_topic = _g("נושא ראשי")
+            orig_sub   = _g("תת נושא מקורי") or _g("תת נושא")
             new_cat    = _g("תת_נושא_חדש")
             cat_src    = _g("סיווג_מקור")
             resp       = _g("אחריות")
             resp_src   = _g("אחריות_מקור")
             raw_addr   = _g("כתובת ואתר/מוסד")
             addr_route = _g("מסלול_כתובת")
+            status     = _g("סטטוס")
+            date_col   = _g("תאריך פתיחה") or _g("תאריך")
 
-            # Which correction types occurred for this ticket?
             has_cat  = bool(orig_sub and new_cat and orig_sub != new_cat and cat_src == "map")
             has_resp = (resp_src in ("map",) and resp not in ("א.מ.ל", "")) or \
                        resp_src.startswith("keyword:") or resp_src == "context_resolve"
-            # Address correction only counts when geocoding has set a real route
             _real_routes = {"std", "intersection", "range", "apt_suffix", "multi", "landmark"}
             has_addr = bool(addr_route in _real_routes and street and raw_addr and len(raw_addr) > 2)
 
             if not (has_cat or has_resp or has_addr):
                 continue
 
-            entry = {
-                "מס' פניה":  ticket,
-                "רחוב":      street,
-                "בית":       house,
-                "תיאור":     desc,
+            _base = {
+                "מס' פניה":    ticket,
+                "תאריך":       date_col,
+                "נושא ראשי":   orig_topic,
+                "תת נושא":     orig_sub,
+                "רחוב":        street,
+                "בית":         house,
+                "סטטוס":       status,
+                "תיאור":       desc,
             }
 
-            # Category correction
             if has_cat:
-                entry["קטגוריה (לפני)"] = orig_sub
-                entry["קטגוריה (אחרי)"] = new_cat
-            else:
-                entry["קטגוריה (לפני)"] = ""
-                entry["קטגוריה (אחרי)"] = ""
-
-            # Responsibility correction
+                _method = _SOURCE_LABELS.get(cat_src, cat_src)
+                if cat_src.startswith("keyword:"):
+                    _method = f'מילת מפתח: {cat_src.split(":", 1)[1]}'
+                rows.append({
+                    **_base,
+                    "סוג תיקון":     "קטגוריה",
+                    "ערך לפני":       orig_sub,
+                    "ערך אחרי":       new_cat,
+                    "שיטת סיווג":     _method,
+                })
             if has_resp:
-                resp_before = "—" if resp_src == "map" else "א.מ.ל"
-                entry["אחריות (לפני)"] = resp_before
-                entry["אחריות (אחרי)"] = resp
-            else:
-                entry["אחריות (לפני)"] = ""
-                entry["אחריות (אחרי)"] = ""
-
-            # Address correction
+                _method = _SOURCE_LABELS.get(resp_src, resp_src)
+                if resp_src.startswith("keyword:"):
+                    _method = f'מילת מפתח: {resp_src.split(":", 1)[1]}'
+                rows.append({
+                    **_base,
+                    "סוג תיקון":     "אחריות",
+                    "ערך לפני":       "לא מסווג",
+                    "ערך אחרי":       resp,
+                    "שיטת סיווג":     _method,
+                })
             if has_addr:
-                entry["כתובת (לפני)"] = raw_addr[:60]
-                entry["כתובת (אחרי)"] = f"{street} {house}".strip()
-                entry["מסלול"]         = route_labels.get(addr_route, addr_route)
-            else:
-                entry["כתובת (לפני)"] = ""
-                entry["כתובת (אחרי)"] = ""
-                entry["מסלול"]         = ""
+                rows.append({
+                    **_base,
+                    "סוג תיקון":     "כתובת",
+                    "ערך לפני":       raw_addr[:60],
+                    "ערך אחרי":       f"{street} {house}".strip(),
+                    "שיטת סיווג":     route_labels.get(addr_route, addr_route),
+                })
 
-            rows.append(entry)
-
-        cols = ["מס' פניה", "רחוב", "בית", "תיאור",
-                "קטגוריה (לפני)", "קטגוריה (אחרי)",
-                "אחריות (לפני)", "אחריות (אחרי)",
-                "כתובת (לפני)", "כתובת (אחרי)", "מסלול"]
+        cols = ["מס' פניה", "תאריך", "נושא ראשי", "תת נושא",
+                "רחוב", "בית", "סטטוס", "תיאור",
+                "סוג תיקון", "ערך לפני", "ערך אחרי", "שיטת סיווג"]
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
     _corr_log = _build_correction_log(df)
 
-    # Count unique tickets and correction types
-    _corr_n_tickets = len(_corr_log)
-    _corr_has_cat  = (_corr_log["קטגוריה (אחרי)"] != "").sum() if not _corr_log.empty else 0
-    _corr_has_resp = (_corr_log["אחריות (אחרי)"]  != "").sum() if not _corr_log.empty else 0
-    _corr_has_addr = (_corr_log["כתובת (אחרי)"]   != "").sum() if not _corr_log.empty else 0
+    # Count by correction type
+    _corr_n_total = len(_corr_log)
+    _corr_n_tickets = _corr_log["מס' פניה"].nunique() if not _corr_log.empty else 0
+    _type_counts = _corr_log["סוג תיקון"].value_counts().to_dict() if not _corr_log.empty else {}
+    _corr_has_cat  = _type_counts.get("קטגוריה", 0)
+    _corr_has_resp = _type_counts.get("אחריות", 0)
+    _corr_has_addr = _type_counts.get("כתובת", 0)
 
+    st.markdown('<div id="section-corrections"></div>', unsafe_allow_html=True)
     with st.expander(
-        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} שורות תוקנו", expanded=False
+        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} כרטיסים, {_corr_n_total:,} תיקונים",
+        expanded=False,
     ):
         if _corr_log.empty:
             st.info("לא בוצעו תיקונים אוטומטיים.")
         else:
-            # Summary
             _stats_parts = []
             if _corr_has_cat:  _stats_parts.append(f"{_corr_has_cat:,} קטגוריה")
             if _corr_has_resp: _stats_parts.append(f"{_corr_has_resp:,} אחריות")
@@ -1095,36 +1150,14 @@ elif stage == "clean":
             st.markdown(
                 f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
                 f'padding:.6rem 1rem;font-size:.85rem;direction:rtl;margin-bottom:.8rem;">'
-                f'סה"כ: {" · ".join(_stats_parts)}'
+                f'סה"כ {_corr_n_tickets:,} כרטיסים · {" · ".join(_stats_parts)}'
                 f'</div>', unsafe_allow_html=True,
             )
 
-            # Multi-select filter across correction types
-            _filter_opts = []
-            if _corr_has_cat:  _filter_opts.append("קטגוריה")
-            if _corr_has_resp: _filter_opts.append("אחריות")
-            if _corr_has_addr: _filter_opts.append("כתובת")
-            _selected_types = st.multiselect(
-                "סנן לפי סוג תיקון (ניתן לבחור כמה)",
-                _filter_opts, default=_filter_opts, key="_corr_filter",
-            )
-            # Keep only rows that have at least one of the selected correction types
-            if _selected_types and len(_selected_types) < len(_filter_opts):
-                _mask_parts = []
-                if "קטגוריה" in _selected_types:
-                    _mask_parts.append(_corr_log["קטגוריה (אחרי)"] != "")
-                if "אחריות" in _selected_types:
-                    _mask_parts.append(_corr_log["אחריות (אחרי)"] != "")
-                if "כתובת" in _selected_types:
-                    _mask_parts.append(_corr_log["כתובת (אחרי)"] != "")
-                import functools, operator
-                _combined_mask = functools.reduce(operator.or_, _mask_parts)
-                _filtered_log = _corr_log[_combined_mask]
-            else:
-                _filtered_log = _corr_log
+            # AG Grid has per-column filters so the multiselect is redundant when AG Grid is available
+            _filtered_log = _corr_log
 
             if _AGGRID_OK and not _filtered_log.empty:
-                # Reverse column order for RTL display (rightmost col = מס' פניה)
                 _rtl_cols = list(reversed(_filtered_log.columns.tolist()))
                 _rtl_df = _filtered_log[_rtl_cols]
                 _gb = GridOptionsBuilder.from_dataframe(_rtl_df)
@@ -1132,8 +1165,10 @@ elif stage == "clean":
                     filterable=True, sortable=True, resizable=True,
                     wrapText=False, autoHeight=False, minWidth=80,
                 )
-                # Pin מס' פניה to right edge, make it narrow
                 _gb.configure_column("מס' פניה", pinned="right", width=90, suppressSizeToFit=True)
+                _gb.configure_column("סוג תיקון", width=100, suppressSizeToFit=True)
+                _gb.configure_column("שיטת סיווג", width=120, suppressSizeToFit=True)
+                _gb.configure_column("תיאור", width=200)
                 _gb.configure_grid_options(
                     enableRtl=True,
                     domLayout="normal",
@@ -1143,30 +1178,62 @@ elif stage == "clean":
                     defaultColDef={"floatingFilter": True},
                 )
                 _gb.configure_pagination(enabled=False)
-                AgGrid(
+                _gb.configure_selection("single")
+                _grid_resp = AgGrid(
                     _rtl_df,
                     gridOptions=_gb.build(),
                     height=560,
-                    update_mode=GridUpdateMode.NO_UPDATE,
+                    update_mode=GridUpdateMode.SELECTION_CHANGED,
                     allow_unsafe_jscode=False,
                     key="_corr_aggrid",
                 )
             else:
+                _grid_resp = None
                 _table(_filtered_log, search=True, max_rows=2000, height=600)
 
-            # Override mechanism
-            st.markdown("---")
-            st.markdown(
-                '<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;'
-                'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
-                '✏️ <strong>מצאת שגיאה?</strong> הזן את מספר הפניה, בחר את העמודה לתיקון, '
-                'והזן את הערך הנכון. התיקון יוחל מיד על הנתונים.</div>',
-                unsafe_allow_html=True,
+            # Export correction log as Excel
+            _corr_buf = io.BytesIO()
+            _filtered_log.to_excel(_corr_buf, index=False, engine="xlsxwriter")
+            st.download_button(
+                "📥 הורד יומן תיקונים כ-Excel",
+                _corr_buf.getvalue(),
+                file_name="יומן_תיקונים.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="_dl_corr_log",
             )
+
+            # Override mechanism — select a row in the grid OR type a ticket ID
+            st.markdown("---")
+            _selected_ticket = ""
+            if _AGGRID_OK and _grid_resp is not None:
+                _sel_rows = _grid_resp.get("selected_rows", None)
+                if _sel_rows is not None and len(_sel_rows) > 0:
+                    _sel_row = _sel_rows[0] if isinstance(_sel_rows, list) else _sel_rows.iloc[0]
+                    _selected_ticket = str(_sel_row.get("מס' פניה", ""))
+
+            if _selected_ticket:
+                st.markdown(
+                    f'<div style="background:#dbeafe;border:1px solid #93c5fd;border-radius:8px;'
+                    f'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
+                    f'✏️ <strong>נבחר כרטיס {_selected_ticket}</strong> — '
+                    f'בחר עמודה לתיקון והזן ערך חדש:</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;'
+                    'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
+                    '✏️ <strong>מצאת שגיאה?</strong> לחץ על שורה בטבלה, או הקלד מספר פניה:</div>',
+                    unsafe_allow_html=True,
+                )
+
             _ov_c1, _ov_c2, _ov_c3 = st.columns([1, 1, 2])
             with _ov_c1:
-                _ov_ticket = st.text_input("מס' פניה לתיקון", key="_ov_ticket",
-                                           placeholder="לדוגמה: 2178241")
+                _ov_ticket = st.text_input(
+                    "מס' פניה לתיקון", key="_ov_ticket",
+                    value=_selected_ticket,
+                    placeholder="לדוגמה: 2178241",
+                )
             with _ov_c2:
                 _ov_col = st.selectbox("עמודה", ["תת_נושא_חדש", "אחריות", "רחוב_ראשי", "מספר_בית"],
                                        key="_ov_col")
@@ -1240,6 +1307,7 @@ elif stage == "clean":
         "האחדה לשם אחד משפרת את הדיוק של מציאת הקואורדינטות."
     )
 
+    st.markdown('<div id="section-qa"></div>', unsafe_allow_html=True)
     if _has_questions:
         st.markdown("---")
         _total_q_rows = (
@@ -1247,22 +1315,28 @@ elif stage == "clean":
             sum(c["unresolved"] for c in _clusters["unresolved_resp"]) +
             sum(v["total"] for v in _st_vars)
         )
+        _total_q_count = (
+            len(_st_vars) +
+            len(_clusters["unknown_subtopics"]) +
+            sum(len(c.get("pattern_groups", [])) for c in _clusters["unresolved_resp"])
+        )
         st.markdown(
             f'<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;'
             f'padding:.8rem 1.1rem;font-size:.9rem;direction:rtl;margin-bottom:1rem;">'
-            f'🙋 <strong>נדרש קלט ממך</strong> — מצאנו {_total_q_rows:,} פניות שלא ניתן '
-            f'לסווג בלי המידע שלך. ענה על השאלות הבאות כדי שהמערכת תסווג אותן אוטומטית. '
+            f'🙋 <strong>נדרש קלט ממך</strong> — {_total_q_count} שאלות על {_total_q_rows:,} פניות. '
+            f'ענה על השאלות הבאות כדי שהמערכת תסווג אותן אוטומטית. '
             f'לכל שאלה יש כפתור ❓ עם הסבר — רחף מעליו לפני שאתה עונה.'
             f'</div>',
             unsafe_allow_html=True,
         )
 
         _qa_answers: dict = {}
+        _q_num = 0
 
         # ── Type 1: Street name variants ──────────────────────────────────
         if _st_vars:
             st.markdown(
-                f'**🗺️ שמות רחובות בכתיבות שונות** {_TIP_STREET}',
+                f'**🗺️ שמות רחובות בכתיבות שונות ({len(_st_vars)} שאלות)** {_TIP_STREET}',
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -1274,6 +1348,7 @@ elif stage == "clean":
                 unsafe_allow_html=True,
             )
             for _sv in _st_vars:
+                _q_num += 1
                 _can  = _sv["canonical"]
                 _tot  = _sv["total"]
                 _reg  = _sv.get("registry_match")
@@ -1282,13 +1357,27 @@ elif stage == "clean":
                 _reg_note = (
                     f'<br><small style="color:#065f46;">✅ שם רשמי ב-GIS: <strong>{_reg}</strong></small>'
                 ) if _reg and _reg != _can else ""
+                # Sample full addresses for context
+                _addr_samples = []
+                if "כתובת ואתר/מוסד" in df.columns and "רחוב_ראשי" in df.columns:
+                    _all_raw = [_can] + [v["raw"] for v in _vars]
+                    _sample_mask = df["רחוב_ראשי"].isin(_all_raw)
+                    _addr_samples = (df.loc[_sample_mask, "כתובת ואתר/מוסד"]
+                                     .dropna().astype(str).unique()[:3].tolist())
+                _addr_html = ""
+                if _addr_samples:
+                    _addr_html = (
+                        '<br><small style="color:#64748b;font-size:.79rem;">'
+                        '<em>דוגמאות כתובות:</em> '
+                        + " · ".join(f'"{a}"' for a in _addr_samples) + '</small>'
+                    )
                 st.markdown(
                     f'<div style="background:#f0fdf4;border-right:3px solid #4ade80;'
                     f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
-                    f'<strong>האם אלה אותו רחוב?</strong><br>'
+                    f'<strong>שאלה {_q_num}/{_total_q_count}: האם אלה אותו רחוב?</strong><br>'
                     f'"{_can}" ({_tot - sum(v["count"] for v in _vars)}×)'
                     f'{f", {_vars_text}" if _vars_text else ""}'
-                    f'{_reg_note}'
+                    f'{_reg_note}{_addr_html}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
@@ -1320,17 +1409,18 @@ elif stage == "clean":
         # ── Type 2: Unknown sub-topics ────────────────────────────────────
         if _clusters["unknown_subtopics"]:
             st.markdown(
-                f'**📋 תת-נושאים שלא מוכרים למערכת** {_TIP_CAT}',
+                f'**📋 תת-נושאים שלא מוכרים למערכת ({len(_clusters["unknown_subtopics"])} שאלות)** {_TIP_CAT}',
                 unsafe_allow_html=True,
             )
             for _cl in _clusters["unknown_subtopics"]:
+                _q_num += 1
                 _sub = _cl["value"]
                 _cnt = _cl["count"]
                 _ex  = " • ".join(_cl.get("examples", [])[:2])
                 st.markdown(
                     f'<div style="background:#fff7ed;border-right:3px solid #fb923c;'
                     f'padding:.55rem .9rem;border-radius:6px;direction:rtl;margin:.5rem 0 .2rem;">'
-                    f'<strong>"{_sub}"</strong> — {_cnt:,} פניות'
+                    f'<strong>שאלה {_q_num}/{_total_q_count}: "{_sub}"</strong> — {_cnt:,} פניות'
                     f'{f"<br><small style=color:#78716c;font-size:.8rem>{_ex}</small>" if _ex else ""}'
                     f'</div>',
                     unsafe_allow_html=True,
@@ -1369,12 +1459,12 @@ elif stage == "clean":
 
                 with st.expander(f'📂 "{_cat}" — {_unres:,} פניות לבירור', expanded=True):
                     for _pg in _pgroups:
+                        _q_num += 1
                         _obs    = _pg["observation"]
                         _pg_cnt = _pg["count"]
                         _smpl   = _pg.get("desc_samples", [])
                         _ctx    = _pg.get("context_sentence", "")
 
-                        # Show context sentence (the new, better-framed question)
                         _smpl_html = ""
                         if _smpl:
                             _smpl_html = (
@@ -1385,6 +1475,7 @@ elif stage == "clean":
                         st.markdown(
                             f'<div style="background:#f8fafc;border-right:3px solid #6366f1;'
                             f'padding:.5rem .85rem;border-radius:6px;direction:rtl;margin:.45rem 0 .15rem;">'
+                            f'<strong>שאלה {_q_num}/{_total_q_count}:</strong> '
                             f'{_ctx if _ctx else f"{_pg_cnt:,} פניות בקטגוריה \"{_cat}\" מזכירות \"{_obs}\""}'
                             f'{_smpl_html}'
                             f'</div>',
@@ -1416,12 +1507,18 @@ elif stage == "clean":
                             unsafe_allow_html=True,
                         )
 
+        # Progress bar
         st.markdown("")
         _n_answered = len(_qa_answers)
+        _pct_answered = round(_n_answered / max(_total_q_count, 1) * 100)
+        st.progress(min(_pct_answered, 100) / 100,
+                    text=f"📊 ענית על {_n_answered} מתוך {_total_q_count} שאלות ({_pct_answered}%)")
+
         _btn_label = f"✅ החל תשובות ({_n_answered} תשובות)" if _n_answered else "✅ החל תשובות"
         if st.button(_btn_label, type="primary", use_container_width=True,
                      disabled=(_n_answered == 0)):
             with st.spinner("מעבד תשובות ומעדכן נתונים..."):
+                st.session_state["_df_before_qa"] = df.copy()
                 _updated_df = cp.apply_user_answers(df, _qa_answers)
                 st.session_state.df = _updated_df
                 _ccs = st.session_state.get("_clean_stats", {}).copy()
@@ -1461,9 +1558,11 @@ elif stage == "clean":
                 _render_flagged_table(_triage["review"])
 
     # ── Download review Excel ───────────────────────────────────────────────
+    st.markdown('<div id="section-download"></div>', unsafe_allow_html=True)
     st.markdown("---")
 
-    def _review_excel(df: pd.DataFrame, flagged: pd.DataFrame) -> bytes:
+    def _review_excel(df: pd.DataFrame, flagged: pd.DataFrame,
+                      corr_log: pd.DataFrame) -> bytes:
         export = df.copy()
         severity    = flagged["_flag_severity"].tolist()
         flag_labels = flagged["_flag_labels"].tolist()
@@ -1472,7 +1571,6 @@ elif stage == "clean":
         det_col     = export.get("_confidence_details", pd.Series([""] * len(export))).tolist() \
                       if "_confidence_details" in export.columns else [""] * len(export)
 
-        # Insert review columns up front
         export.insert(0, "פירוט_החלטה",    det_col)
         export.insert(0, "רמת_ביטחון",     conf_col)
         export.insert(0, "אזהרה_בלבד",     [s == "warn"  for s in severity])
@@ -1481,7 +1579,6 @@ elif stage == "clean":
         export = export.drop(columns=[c for c in export.columns if c.startswith("_")],
                              errors="ignore")
 
-        _conf_bg = {"high": "#dcfce7", "medium": "#fef9c3", "low": "#fee2e2", "": "#ffffff"}
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
             wb = writer.book
@@ -1490,11 +1587,9 @@ elif stage == "clean":
             fmt_block  = wb.add_format({"bg_color": "#fecaca", "border": 1})
             fmt_warn   = wb.add_format({"bg_color": "#fef08a", "border": 1})
             fmt_ok     = wb.add_format({"bg_color": "#ffffff", "border": 1})
-            fmt_hi     = wb.add_format({"bg_color": "#dcfce7", "border": 1})
-            fmt_med    = wb.add_format({"bg_color": "#fef9c3", "border": 1})
             fmt_lo     = wb.add_format({"bg_color": "#fecaca", "bold": True, "border": 1})
 
-            # Sheet 1 — full dataset, row colored by flag severity
+            # Sheet 1 — full dataset
             export.to_excel(writer, index=False, sheet_name="כל הנתונים")
             ws = writer.sheets["כל הנתונים"]
             for j, col in enumerate(export.columns):
@@ -1505,13 +1600,21 @@ elif stage == "clean":
             ws.set_column(0, 0, 40); ws.set_column(1, 4, 14); ws.set_column(5, len(export.columns), 18)
             ws.freeze_panes(1, 0)
 
-            # Sheet 2 — low-confidence rows only (manual review list)
+            # Sheet 2 — correction log (what changed, how, why)
+            if not corr_log.empty:
+                corr_log.to_excel(writer, index=False, sheet_name="תיקונים אוטומטיים")
+                ws_corr = writer.sheets["תיקונים אוטומטיים"]
+                for j, col in enumerate(corr_log.columns):
+                    ws_corr.write(0, j, col, fmt_hdr)
+                ws_corr.set_column(0, len(corr_log.columns), 18)
+                ws_corr.freeze_panes(1, 0)
+
+            # Sheet 3 — rows needing manual review
             _low_mask = [c == "low" for c in conf_col]
-            _low_export = export[[m for m in _low_mask]]
             if any(_low_mask):
                 _low_rows = export.iloc[[i for i, m in enumerate(_low_mask) if m]]
-                _low_rows.to_excel(writer, index=False, sheet_name="נותרו ללא תבנית")
-                ws2 = writer.sheets["נותרו ללא תבנית"]
+                _low_rows.to_excel(writer, index=False, sheet_name="לבירור ידני")
+                ws2 = writer.sheets["לבירור ידני"]
                 for j, col in enumerate(_low_rows.columns):
                     ws2.write(0, j, col, fmt_hdr)
                 for i in range(len(_low_rows)):
@@ -1519,7 +1622,7 @@ elif stage == "clean":
                 ws2.set_column(0, 0, 40); ws2.set_column(5, len(_low_rows.columns), 18)
                 ws2.freeze_panes(1, 0)
 
-            # Sheet 3 — blocking structural issues
+            # Sheet 4 — blocking structural issues
             _bl_rows = export.iloc[[i for i, s in enumerate(severity) if s == "block"]]
             if not _bl_rows.empty:
                 _bl_rows.to_excel(writer, index=False, sheet_name="דורשות תיקון")
@@ -1531,7 +1634,7 @@ elif stage == "clean":
                 ws3.set_column(0, 0, 40); ws3.set_column(5, len(_bl_rows.columns), 18)
                 ws3.freeze_panes(1, 0)
 
-            # Sheet 4 — summary
+            # Sheet 5 — summary
             _low_cnt  = sum(_low_mask)
             _med_cnt  = sum(c == "medium" for c in conf_col)
             _hi_cnt   = sum(c == "high"   for c in conf_col)
@@ -1539,9 +1642,10 @@ elif stage == "clean":
                 ("סה״כ שורות",              len(export)),
                 ("סווגו ודאית",              _hi_cnt),
                 ("סווגו בחלקיות",            _med_cnt),
-                ("נותרו ללא תבנית (Excel)",  _low_cnt),
+                ("לבירור ידני",              _low_cnt),
                 ("שגיאות מבניות",            n_block),
                 ("אזהרות מבניות",            n_warn),
+                ("תיקונים אוטומטיים",       len(corr_log)),
             ], columns=["מדד", "ערך"]).to_excel(writer, index=False, sheet_name="סיכום")
             ws4 = writer.sheets["סיכום"]
             ws4.set_column("A:A", 30); ws4.set_column("B:B", 14)
@@ -1552,15 +1656,24 @@ elif stage == "clean":
 
     base = st.session_state.filename.replace(".xlsx", "")
 
-    st.markdown("---")
+    # Warn if Q&A questions exist but weren't answered
+    if _has_questions and not st.session_state.get("_qa_applied"):
+        st.markdown(
+            '<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;'
+            'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
+            '⚠️ <strong>יש שאלות שלא נענו למעלה.</strong> '
+            'מומלץ לענות עליהן לפני ההורדה — כל תשובה מפחיתה את כמות השורות לבירור ידני.</div>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown("#### 📤 שלב הבא — הורדה ובדיקה ידנית")
     st.markdown(
         f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
         f'padding:.8rem 1.1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
-        f'הקובץ כולל 4 גיליונות:<br>'
+        f'הקובץ כולל 5 גיליונות:<br>'
         f'• <strong>כל הנתונים</strong> — כל {len(df):,} שורות, צבועות לפי רמת ביטחון<br>'
-        f'• <strong>נותרו ללא תבנית</strong> — {n_low:,} שורות שהמערכת לא הצליחה לסווג '
-        f'(אלה דורשות בדיקה ידנית)<br>'
+        f'• <strong>תיקונים אוטומטיים</strong> — כל תיקון שבוצע: מה שונה, לפני/אחרי, ובאיזו שיטה<br>'
+        f'• <strong>לבירור ידני</strong> — {n_low:,} שורות שהמערכת לא הצליחה לסווג<br>'
         f'• <strong>דורשות תיקון</strong> — שגיאות מבניות שחוסמות המשך<br>'
         f'• <strong>סיכום</strong> — סטטיסטיקה כללית</div>',
         unsafe_allow_html=True,
@@ -1569,7 +1682,7 @@ elif stage == "clean":
     with _dl_col1:
         st.download_button(
             label=f"📥 הורד Excel לבדיקה — {len(df):,} שורות ({n_low:,} לבירור ידני)",
-            data=_review_excel(df, flagged),
+            data=_review_excel(df, flagged, _corr_log),
             file_name=f"{base}_לבדיקה.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
@@ -1582,7 +1695,10 @@ elif stage == "clean":
 
     # ── Re-upload corrected file ────────────────────────────────────────────
     with st.expander("📤 העלה קובץ מתוקן לבדיקה חוזרת", expanded=(n_block > 0)):
-        st.markdown("לאחר תיקון ידני ב-Excel — העלו כאן את הקובץ המקורי המתוקן (לא קובץ הבדיקה) לבדיקה חוזרת.")
+        st.markdown(
+            "תיקנת שורות ב-Excel? העלה כאן את **הקובץ המתוקן** (הגיליון 'כל הנתונים' או 'לבירור ידני'). "
+            "המערכת תרוץ שוב על הנתונים המתוקנים ותעדכן את הסיכום."
+        )
         reupload = st.file_uploader("קובץ מתוקן (.xlsx)", type=["xlsx"],
                                      key="reupload", label_visibility="collapsed")
         if reupload:
