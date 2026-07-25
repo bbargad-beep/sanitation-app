@@ -934,6 +934,15 @@ elif stage == "clean":
 
     st.markdown("### שלב 2 — ניקוי: סקירת תיקונים ועדכון ידני")
 
+    # ── Success banner after Q&A apply ────────────────────────────────────────
+    if st.session_state.pop("_qa_applied", False):
+        st.success(
+            "✅ **התשובות הוחלו בהצלחה.** הנתונים עודכנו. "
+            "הורד את קובץ ה-Excel למטה לבדיקת השורות שנותרו לבירור ידני, "
+            "ואז המשך לגאוקוד.",
+            icon="✅",
+        )
+
     # ── Summary cards (3 cards: auto-processed, awaiting input, structural) ─
     _pct_auto = round(n_auto / len(df) * 100) if len(df) else 0
     st.markdown(f"""
@@ -1261,7 +1270,9 @@ elif stage == "clean":
                     index=1 if _reg and _reg not in _deduped else 0,
                     help="בחר את הכתיב הנכון. כל הכתיבות האחרות יאוחדו לכתיב שתבחר.",
                 )
-                if _ans != "השאר כמו שיש" and _ans != _can:
+                # Accept any choice that isn't "leave as-is" — even if the answer
+                # equals _can, we still need to remap all other variants to it.
+                if _ans != "השאר כמו שיש":
                     for _raw_v in _deduped:
                         if _raw_v != _ans:
                             _qa_answers[f"street:{_raw_v}"] = _ans
@@ -1366,20 +1377,21 @@ elif stage == "clean":
                         )
 
         st.markdown("")
-        if st.button("✅ החל תשובות", type="primary", use_container_width=True):
-            if _qa_answers:
-                with st.spinner("מעדכן..."):
-                    _updated_df = cp.apply_user_answers(df, _qa_answers)
-                    st.session_state.df = _updated_df
-                    _ccs = st.session_state.get("_clean_stats", {}).copy()
-                    _ccs["conf_high"]   = int((_updated_df["_confidence"] == "high").sum()   if "_confidence" in _updated_df.columns else 0)
-                    _ccs["conf_medium"] = int((_updated_df["_confidence"] == "medium").sum() if "_confidence" in _updated_df.columns else 0)
-                    _ccs["conf_low"]    = int((_updated_df["_confidence"] == "low").sum()    if "_confidence" in _updated_df.columns else 0)
-                    st.session_state["_clean_stats"] = _ccs
-                    al.log_correction("batch", "_cluster_qa", "pending", str(list(_qa_answers.keys())), "user_qa")
-                st.rerun()
-            else:
-                st.info("לא נבחרה תשובה — בחר לפחות אחת.")
+        _n_answered = len(_qa_answers)
+        _btn_label = f"✅ החל תשובות ({_n_answered} תשובות)" if _n_answered else "✅ החל תשובות"
+        if st.button(_btn_label, type="primary", use_container_width=True,
+                     disabled=(_n_answered == 0)):
+            with st.spinner("מעבד תשובות ומעדכן נתונים..."):
+                _updated_df = cp.apply_user_answers(df, _qa_answers)
+                st.session_state.df = _updated_df
+                _ccs = st.session_state.get("_clean_stats", {}).copy()
+                _ccs["conf_high"]   = int((_updated_df["_confidence"] == "high").sum()   if "_confidence" in _updated_df.columns else 0)
+                _ccs["conf_medium"] = int((_updated_df["_confidence"] == "medium").sum() if "_confidence" in _updated_df.columns else 0)
+                _ccs["conf_low"]    = int((_updated_df["_confidence"] == "low").sum()    if "_confidence" in _updated_df.columns else 0)
+                st.session_state["_clean_stats"] = _ccs
+                al.log_correction("batch", "_cluster_qa", "pending", str(list(_qa_answers.keys())), "user_qa")
+                st.session_state["_qa_applied"] = True
+            st.rerun()
 
     # ════════════════════════════════════════════════════════
     #  TIER D — Structural integrity flags (existing logic)
@@ -1499,18 +1511,34 @@ elif stage == "clean":
         return buf.getvalue()
 
     base = st.session_state.filename.replace(".xlsx", "")
-    _dl_label = (
-        f"📥 הורד קובץ Excel — {len(df):,} שורות | "
-        f"{n_high:,} ✅ ודאי | {n_medium:,} 🔵 חלקי"
-        + (f" | {n_low:,} 📎 ללא תבנית" if n_low > 0 else "")
+
+    st.markdown("---")
+    st.markdown("#### 📤 שלב הבא — הורדה ובדיקה ידנית")
+    st.markdown(
+        f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
+        f'padding:.8rem 1.1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
+        f'הקובץ כולל 4 גיליונות:<br>'
+        f'• <strong>כל הנתונים</strong> — כל {len(df):,} שורות, צבועות לפי רמת ביטחון<br>'
+        f'• <strong>נותרו ללא תבנית</strong> — {n_low:,} שורות שהמערכת לא הצליחה לסווג '
+        f'(אלה דורשות בדיקה ידנית)<br>'
+        f'• <strong>דורשות תיקון</strong> — שגיאות מבניות שחוסמות המשך<br>'
+        f'• <strong>סיכום</strong> — סטטיסטיקה כללית</div>',
+        unsafe_allow_html=True,
     )
-    st.download_button(
-        label=_dl_label,
-        data=_review_excel(df, flagged),
-        file_name=f"{base}_לבדיקה.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    _dl_col1, _dl_col2 = st.columns([3, 1])
+    with _dl_col1:
+        st.download_button(
+            label=f"📥 הורד Excel לבדיקה — {len(df):,} שורות ({n_low:,} לבירור ידני)",
+            data=_review_excel(df, flagged),
+            file_name=f"{base}_לבדיקה.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
+    with _dl_col2:
+        if st.button("➡️ המשך לגאוקוד", use_container_width=True,
+                     help="לאחר שהורדת ובדקת את הקובץ — לחץ להמשיך"):
+            goto("geocode")
 
     # ── Re-upload corrected file ────────────────────────────────────────────
     with st.expander("📤 העלה קובץ מתוקן לבדיקה חוזרת", expanded=(n_block > 0)):
