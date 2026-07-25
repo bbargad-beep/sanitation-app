@@ -736,15 +736,18 @@ def auto_resolve_from_context(df: pd.DataFrame) -> pd.DataFrame:
 
         combined_text = f"{desc} {addr_note} {loc_note}"
 
-        if "טופל" in status and cat in ("כלי אצירה פגומים", "משטח מלוכלך", "פח נעלם"):
+        # Rule 1: status "טופל" + equipment/asset categories → municipal failure
+        # (municipality acknowledged it by fixing it)
+        # NOTE: broad status check alone is NOT enough — "טופל" just means the
+        # ticket was closed, not who caused it. Only apply to categories where
+        # the asset itself is municipal property.
+        if "טופל" in status and cat in ("כלי אצירה פגומים", "פח נעלם"):
             resolved = "כשל עירוני"
             source = "context_resolve"
 
-        if not resolved and dept:
-            dept_lower = dept.strip()
-            if any(w in dept_lower for w in ("ניקוי", "פינוי", "תברואה", "אשפה")):
-                resolved = "כשל עירוני"
-                source = "context_resolve"
+        # Rule 2 REMOVED: מחלקה = "תברואה" appears on EVERY complaint in this
+        # dataset — it indicates which department handles the ticket, not who
+        # caused the problem. Using it here resolved 17k/17k rows incorrectly.
 
         if not resolved:
             addr_lower = addr.strip()
