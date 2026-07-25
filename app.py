@@ -996,26 +996,32 @@ elif stage == "clean":
         route_labels = {"std": "כתובת", "intersection": "צומת",
                         "range": "טווח", "apt_suffix": "סיומת דירה",
                         "multi": "מרובה", "landmark": "ציון דרך"}
+        _col = {c: i for i, c in enumerate(df.columns)}
         rows = []
-        for idx in range(len(df)):
-            row = df.iloc[idx]
-            ticket    = str(row.get("מס' פניה", ""))
-            street    = str(row.get("רחוב_ראשי", "")).strip()
-            house     = str(row.get("מספר_בית", "")).strip()
-            desc      = str(row.get("תיאור", ""))[:80].strip()
-            orig_sub  = str(row.get("תת נושא מקורי", "")).strip()
-            new_cat   = str(row.get("תת_נושא_חדש", "")).strip()
-            cat_src   = str(row.get("סיווג_מקור", ""))
-            resp      = str(row.get("אחריות", "")).strip()
-            resp_src  = str(row.get("אחריות_מקור", "")).strip()
-            raw_addr  = str(row.get("כתובת ואתר/מוסד", "")).strip()
-            addr_route = str(row.get("מסלול_כתובת", ""))
+        for row in df.itertuples(index=False, name=None):
+            def _g(col, default=""):
+                i = _col.get(col)
+                return str(row[i]).strip() if i is not None else default
+
+            ticket     = _g("מס' פניה")
+            street     = _g("רחוב_ראשי")
+            house      = _g("מספר_בית")
+            desc       = _g("תיאור")[:80]
+            orig_sub   = _g("תת נושא מקורי")
+            new_cat    = _g("תת_נושא_חדש")
+            cat_src    = _g("סיווג_מקור")
+            resp       = _g("אחריות")
+            resp_src   = _g("אחריות_מקור")
+            raw_addr   = _g("כתובת ואתר/מוסד")
+            addr_route = _g("מסלול_כתובת")
 
             # Which correction types occurred for this ticket?
             has_cat  = bool(orig_sub and new_cat and orig_sub != new_cat and cat_src == "map")
-            has_resp = resp_src in ("map",) and resp not in ("א.מ.ל", "") or \
+            has_resp = (resp_src in ("map",) and resp not in ("א.מ.ל", "")) or \
                        resp_src.startswith("keyword:") or resp_src == "context_resolve"
-            has_addr = bool(street and raw_addr and street != raw_addr and len(raw_addr) > 2)
+            # Address correction only counts when geocoding has set a real route
+            _real_routes = {"std", "intersection", "range", "apt_suffix", "multi", "landmark"}
+            has_addr = bool(addr_route in _real_routes and street and raw_addr and len(raw_addr) > 2)
 
             if not (has_cat or has_resp or has_addr):
                 continue
