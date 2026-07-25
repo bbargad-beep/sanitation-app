@@ -979,79 +979,99 @@ elif stage == "clean":
     # ════════════════════════════════════════════════════════
 
     def _build_correction_log(df: pd.DataFrame) -> pd.DataFrame:
-        """Build a human-readable log of every auto-correction from provenance columns."""
-        entries = []
+        """
+        One row per ticket. Each correction type gets its own before/after columns.
+        Includes key context columns (street, house, description) so the user can
+        read everything without cross-referencing another table.
+        """
+        route_labels = {"std": "כתובת", "intersection": "צומת",
+                        "range": "טווח", "apt_suffix": "סיומת דירה",
+                        "multi": "מרובה", "landmark": "ציון דרך"}
+        rows = []
         for idx in range(len(df)):
             row = df.iloc[idx]
-            ticket = str(row.get("מס' פניה", ""))
+            ticket    = str(row.get("מס' פניה", ""))
+            street    = str(row.get("רחוב_ראשי", "")).strip()
+            house     = str(row.get("מספר_בית", "")).strip()
+            desc      = str(row.get("תיאור", ""))[:80].strip()
+            orig_sub  = str(row.get("תת נושא מקורי", "")).strip()
+            new_cat   = str(row.get("תת_נושא_חדש", "")).strip()
+            cat_src   = str(row.get("סיווג_מקור", ""))
+            resp      = str(row.get("אחריות", "")).strip()
+            resp_src  = str(row.get("אחריות_מקור", "")).strip()
+            raw_addr  = str(row.get("כתובת ואתר/מוסד", "")).strip()
+            addr_route = str(row.get("מסלול_כתובת", ""))
 
-            orig_sub = str(row.get("תת נושא מקורי", "")).strip()
-            new_cat = str(row.get("תת_נושא_חדש", "")).strip()
-            cat_src = str(row.get("סיווג_מקור", ""))
-            if orig_sub and new_cat and orig_sub != new_cat and cat_src == "map":
-                entries.append({
-                    "_row_idx": df.index[idx], "מס' פניה": ticket,
-                    "סוג": "קטגוריה",
-                    "ערך מקורי": orig_sub,
-                    "ערך חדש": new_cat,
-                    "כלל": "מיפוי קטגוריות",
-                })
+            # Which correction types occurred for this ticket?
+            has_cat  = bool(orig_sub and new_cat and orig_sub != new_cat and cat_src == "map")
+            has_resp = resp_src in ("map",) and resp not in ("א.מ.ל", "") or \
+                       resp_src.startswith("keyword:") or resp_src == "context_resolve"
+            has_addr = bool(street and raw_addr and street != raw_addr and len(raw_addr) > 2)
 
-            resp = str(row.get("אחריות", ""))
-            resp_src = str(row.get("אחריות_מקור", ""))
-            if resp_src == "map" and resp != "א.מ.ל":
-                entries.append({
-                    "_row_idx": df.index[idx], "מס' פניה": ticket,
-                    "סוג": "אחריות",
-                    "ערך מקורי": "—",
-                    "ערך חדש": resp,
-                    "כלל": f"מיפוי מקטגוריה: {new_cat}",
-                })
-            elif resp_src.startswith("keyword:"):
-                entries.append({
-                    "_row_idx": df.index[idx], "מס' פניה": ticket,
-                    "סוג": "אחריות",
-                    "ערך מקורי": "א.מ.ל",
-                    "ערך חדש": resp,
-                    "כלל": f"מילת מפתח בתיאור",
-                })
-            elif resp_src == "context_resolve":
-                entries.append({
-                    "_row_idx": df.index[idx], "מס' פניה": ticket,
-                    "סוג": "אחריות",
-                    "ערך מקורי": "א.מ.ל",
-                    "ערך חדש": resp,
-                    "כלל": "ניתוח הקשר רב-עמודתי",
-                })
+            if not (has_cat or has_resp or has_addr):
+                continue
 
-            raw_addr = str(row.get("כתובת ואתר/מוסד", "")).strip()
-            street = str(row.get("רחוב_ראשי", "")).strip()
-            if street and raw_addr and street != raw_addr and len(raw_addr) > 2:
-                addr_route = str(row.get("מסלול_כתובת", ""))
-                route_labels = {"std": "כתובת", "intersection": "צומת",
-                                "range": "טווח", "apt_suffix": "סיומת דירה",
-                                "multi": "מרובה", "landmark": "ציון דרך"}
-                entries.append({
-                    "_row_idx": df.index[idx], "מס' פניה": ticket,
-                    "סוג": "כתובת",
-                    "ערך מקורי": raw_addr[:50],
-                    "ערך חדש": f"{street} {str(row.get('מספר_בית', '')).strip()}".strip(),
-                    "כלל": f"ניתוח כתובת ({route_labels.get(addr_route, addr_route)})",
-                })
-        return pd.DataFrame(entries) if entries else pd.DataFrame(
-            columns=["_row_idx", "מס' פניה", "סוג", "ערך מקורי", "ערך חדש", "כלל"])
+            entry = {
+                "מס' פניה":  ticket,
+                "רחוב":      street,
+                "בית":       house,
+                "תיאור":     desc,
+            }
+
+            # Category correction
+            if has_cat:
+                entry["קטגוריה (לפני)"] = orig_sub
+                entry["קטגוריה (אחרי)"] = new_cat
+            else:
+                entry["קטגוריה (לפני)"] = ""
+                entry["קטגוריה (אחרי)"] = ""
+
+            # Responsibility correction
+            if has_resp:
+                resp_before = "—" if resp_src == "map" else "א.מ.ל"
+                entry["אחריות (לפני)"] = resp_before
+                entry["אחריות (אחרי)"] = resp
+            else:
+                entry["אחריות (לפני)"] = ""
+                entry["אחריות (אחרי)"] = ""
+
+            # Address correction
+            if has_addr:
+                entry["כתובת (לפני)"] = raw_addr[:60]
+                entry["כתובת (אחרי)"] = f"{street} {house}".strip()
+                entry["מסלול"]         = route_labels.get(addr_route, addr_route)
+            else:
+                entry["כתובת (לפני)"] = ""
+                entry["כתובת (אחרי)"] = ""
+                entry["מסלול"]         = ""
+
+            rows.append(entry)
+
+        cols = ["מס' פניה", "רחוב", "בית", "תיאור",
+                "קטגוריה (לפני)", "קטגוריה (אחרי)",
+                "אחריות (לפני)", "אחריות (אחרי)",
+                "כתובת (לפני)", "כתובת (אחרי)", "מסלול"]
+        return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
     _corr_log = _build_correction_log(df)
 
-    with st.expander(f"📋 יומן תיקונים אוטומטיים — {len(_corr_log):,} תיקונים ({n_auto:,} שורות)", expanded=False):
+    # Count unique tickets and correction types
+    _corr_n_tickets = len(_corr_log)
+    _corr_has_cat  = (_corr_log["קטגוריה (אחרי)"] != "").sum() if not _corr_log.empty else 0
+    _corr_has_resp = (_corr_log["אחריות (אחרי)"]  != "").sum() if not _corr_log.empty else 0
+    _corr_has_addr = (_corr_log["כתובת (אחרי)"]   != "").sum() if not _corr_log.empty else 0
+
+    with st.expander(
+        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} שורות תוקנו", expanded=False
+    ):
         if _corr_log.empty:
             st.info("לא בוצעו תיקונים אוטומטיים.")
         else:
-            # Summary stats by correction type
-            _type_counts = _corr_log["סוג"].value_counts()
+            # Summary
             _stats_parts = []
-            for _t, _c in _type_counts.items():
-                _stats_parts.append(f"{_c:,} {_t}")
+            if _corr_has_cat:  _stats_parts.append(f"{_corr_has_cat:,} קטגוריה")
+            if _corr_has_resp: _stats_parts.append(f"{_corr_has_resp:,} אחריות")
+            if _corr_has_addr: _stats_parts.append(f"{_corr_has_addr:,} כתובת")
             st.markdown(
                 f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
                 f'padding:.6rem 1rem;font-size:.85rem;direction:rtl;margin-bottom:.8rem;">'
@@ -1059,16 +1079,31 @@ elif stage == "clean":
                 f'</div>', unsafe_allow_html=True,
             )
 
-            # Filter by correction type
-            _filter_type = st.selectbox(
-                "סנן לפי סוג תיקון", ["הכל"] + list(_type_counts.index),
-                key="_corr_filter",
+            # Multi-select filter across correction types
+            _filter_opts = []
+            if _corr_has_cat:  _filter_opts.append("קטגוריה")
+            if _corr_has_resp: _filter_opts.append("אחריות")
+            if _corr_has_addr: _filter_opts.append("כתובת")
+            _selected_types = st.multiselect(
+                "סנן לפי סוג תיקון (ניתן לבחור כמה)",
+                _filter_opts, default=_filter_opts, key="_corr_filter",
             )
-            _filtered_log = _corr_log if _filter_type == "הכל" else _corr_log[_corr_log["סוג"] == _filter_type]
+            # Keep only rows that have at least one of the selected correction types
+            if _selected_types and len(_selected_types) < len(_filter_opts):
+                _mask_parts = []
+                if "קטגוריה" in _selected_types:
+                    _mask_parts.append(_corr_log["קטגוריה (אחרי)"] != "")
+                if "אחריות" in _selected_types:
+                    _mask_parts.append(_corr_log["אחריות (אחרי)"] != "")
+                if "כתובת" in _selected_types:
+                    _mask_parts.append(_corr_log["כתובת (אחרי)"] != "")
+                import functools, operator
+                _combined_mask = functools.reduce(operator.or_, _mask_parts)
+                _filtered_log = _corr_log[_combined_mask]
+            else:
+                _filtered_log = _corr_log
 
-            # Display table (without internal _row_idx)
-            _display_log = _filtered_log.drop(columns=["_row_idx"])
-            _table(_display_log, search=True, max_rows=500, height=520)
+            _table(_filtered_log, search=True, max_rows=2000, height=600)
 
             # Override mechanism
             st.markdown("---")
