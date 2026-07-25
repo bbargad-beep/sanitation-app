@@ -12,6 +12,11 @@ import sys
 import pandas as pd
 import numpy as np
 import streamlit as st
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+    _AGGRID_OK = True
+except ImportError:
+    _AGGRID_OK = False
 import streamlit.components.v1 as components
 import plotly.express as px
 
@@ -1118,7 +1123,36 @@ elif stage == "clean":
             else:
                 _filtered_log = _corr_log
 
-            _table(_filtered_log, search=True, max_rows=2000, height=600)
+            if _AGGRID_OK and not _filtered_log.empty:
+                # Reverse column order for RTL display (rightmost col = מס' פניה)
+                _rtl_cols = list(reversed(_filtered_log.columns.tolist()))
+                _rtl_df = _filtered_log[_rtl_cols]
+                _gb = GridOptionsBuilder.from_dataframe(_rtl_df)
+                _gb.configure_default_column(
+                    filterable=True, sortable=True, resizable=True,
+                    wrapText=False, autoHeight=False, minWidth=80,
+                )
+                # Pin מס' פניה to right edge, make it narrow
+                _gb.configure_column("מס' פניה", pinned="right", width=90, suppressSizeToFit=True)
+                _gb.configure_grid_options(
+                    enableRtl=True,
+                    domLayout="normal",
+                    rowHeight=32,
+                    headerHeight=36,
+                    suppressColumnVirtualisation=False,
+                    defaultColDef={"floatingFilter": True},
+                )
+                _gb.configure_pagination(enabled=False)
+                AgGrid(
+                    _rtl_df,
+                    gridOptions=_gb.build(),
+                    height=560,
+                    update_mode=GridUpdateMode.NO_UPDATE,
+                    allow_unsafe_jscode=False,
+                    key="_corr_aggrid",
+                )
+            else:
+                _table(_filtered_log, search=True, max_rows=2000, height=600)
 
             # Override mechanism
             st.markdown("---")
