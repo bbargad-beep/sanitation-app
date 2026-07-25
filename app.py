@@ -1095,38 +1095,45 @@ elif stage == "clean":
 
             if has_cat:
                 _method = _SOURCE_LABELS.get(cat_src, cat_src)
-                if cat_src.startswith("keyword:"):
-                    _method = f'מילת מפתח: {cat_src.split(":", 1)[1]}'
+                _mahut = f'תת-נושא "{orig_sub}" שויך לקטגוריה "{new_cat}" לפי טבלת המיפוי'
                 rows.append({
                     **_base,
-                    "סוג תיקון":     "קטגוריה",
-                    "ערך לפני":       orig_sub,
-                    "ערך אחרי":       new_cat,
-                    "שיטת סיווג":     _method,
+                    "סוג תיקון":   "קטגוריה",
+                    "לפני":        orig_sub,
+                    "אחרי":        new_cat,
+                    "מהות התיקון": _mahut,
                 })
             if has_resp:
-                _method = _SOURCE_LABELS.get(resp_src, resp_src)
-                if resp_src.startswith("keyword:"):
-                    _method = f'מילת מפתח: {resp_src.split(":", 1)[1]}'
+                if resp_src == "map":
+                    _mahut = f'אחריות נקבעה כ"{resp}" — כל פניות הקטגוריה "{new_cat}" מסווגות כך'
+                elif resp_src.startswith("keyword:"):
+                    _kw = resp_src.split(":", 1)[1]
+                    _mahut = f'אחריות נקבעה כ"{resp}" בגלל מילת המפתח "{_kw}" שנמצאה בתיאור'
+                elif resp_src == "context_resolve":
+                    _mahut = f'אחריות נקבעה כ"{resp}" מהקשר: הפנייה טופלה והקטגוריה מצביעה על כשל בציוד'
+                else:
+                    _mahut = f'אחריות נקבעה כ"{resp}"'
                 rows.append({
                     **_base,
-                    "סוג תיקון":     "אחריות",
-                    "ערך לפני":       "לא מסווג",
-                    "ערך אחרי":       resp,
-                    "שיטת סיווג":     _method,
+                    "סוג תיקון":   "אחריות",
+                    "לפני":        "לא מסווג",
+                    "אחרי":        resp,
+                    "מהות התיקון": _mahut,
                 })
             if has_addr:
+                _route_he = route_labels.get(addr_route, addr_route)
+                _mahut = f'כתובת "{raw_addr[:50]}" נוּתחה: רחוב "{street}", בית {house} (סוג: {_route_he})'
                 rows.append({
                     **_base,
-                    "סוג תיקון":     "כתובת",
-                    "ערך לפני":       raw_addr[:60],
-                    "ערך אחרי":       f"{street} {house}".strip(),
-                    "שיטת סיווג":     route_labels.get(addr_route, addr_route),
+                    "סוג תיקון":   "כתובת",
+                    "לפני":        raw_addr[:60],
+                    "אחרי":        f"{street} {house}".strip(),
+                    "מהות התיקון": _mahut,
                 })
 
         cols = ["מס' פניה", "תאריך", "נושא", "תת נושא", "חומר", "נכס",
                 "רחוב", "בית", "סטטוס", "תיאור",
-                "סוג תיקון", "ערך לפני", "ערך אחרי", "שיטת סיווג"]
+                "סוג תיקון", "לפני", "אחרי", "מהות התיקון"]
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
     _corr_log = _build_correction_log(df)
@@ -1171,7 +1178,9 @@ elif stage == "clean":
                 )
                 _gb.configure_column("מס' פניה", pinned="right", width=90, suppressSizeToFit=True)
                 _gb.configure_column("סוג תיקון", width=100, suppressSizeToFit=True)
-                _gb.configure_column("שיטת סיווג", width=120, suppressSizeToFit=True)
+                _gb.configure_column("מהות התיקון", width=320)
+                _gb.configure_column("לפני", width=130, suppressSizeToFit=True)
+                _gb.configure_column("אחרי", width=130, suppressSizeToFit=True)
                 _gb.configure_column("תיאור", width=200)
                 _gb.configure_grid_options(
                     enableRtl=True,
