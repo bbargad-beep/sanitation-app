@@ -701,6 +701,114 @@ def _discover_patterns(desc_list: list, min_count: int = 3, max_groups: int = 12
     return groups, used
 
 
+def auto_resolve_from_context(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For rows with אחריות_מקור == "unresolved", attempt resolution by reading
+    ALL available columns — not just תיאור.
+
+    Rules applied (in priority order):
+      1. סטטוס פנייה contains "טופל" + ambiguous category → כשל עירוני
+         (municipality acknowledged the issue by handling it)
+      2. מחלקה contains crew/cleaning refs → כשל עירוני
+      3. כתובת context: beach/park locations with nature-related descriptions → טבעי
+      4. הערת_כתובת or הערת_מיקום mentions specific infrastructure → כשל עירוני
+      5. Re-run keyword matching on תיאור (picks up any newly added keywords)
+    """
+    df = df.copy()
+    if "אחריות_מקור" not in df.columns:
+        return df
+
+    unresolved = df["אחריות_מקור"] == "unresolved"
+    if not unresolved.any():
+        return df
+
+    for idx in df.index[unresolved]:
+        resolved = None
+        source = None
+
+        status = str(df.at[idx, "סטטוס פנייה"]) if "סטטוס פנייה" in df.columns else ""
+        dept = str(df.at[idx, "מחלקה"]) if "מחלקה" in df.columns else ""
+        addr = str(df.at[idx, "כתובת ואתר/מוסד"]) if "כתובת ואתר/מוסד" in df.columns else ""
+        desc = str(df.at[idx, "תיאור"]) if "תיאור" in df.columns else ""
+        addr_note = str(df.at[idx, "הערת_כתובת"]) if "הערת_כתובת" in df.columns else ""
+        loc_note = str(df.at[idx, "הערת_מיקום"]) if "הערת_מיקום" in df.columns else ""
+        cat = str(df.at[idx, "תת_נושא_חדש"]) if "תת_נושא_חדש" in df.columns else ""
+
+        combined_text = f"{desc} {addr_note} {loc_note}"
+
+        if "טופל" in status and cat in ("כלי אצירה פגומים", "משטח מלוכלך", "פח נעלם"):
+            resolved = "כשל עירוני"
+            source = "context_resolve"
+
+        if not resolved and dept:
+            dept_lower = dept.strip()
+            if any(w in dept_lower for w in ("ניקוי", "פינוי", "תברואה", "אשפה")):
+                resolved = "כשל עירוני"
+                source = "context_resolve"
+
+        if not resolved:
+            addr_lower = addr.strip()
+            if any(addr_lower.startswith(p) for p in ("חוף ", "שפת הים", "טיילת")):
+                nature_words = ("עלים", "שלכת", "חול", "ים", "גשם", "רוח", "סחף")
+                citizen_words = ("זרקו", "פיזרו", "השאירו", "אנשים", "שכנים")
+                if any(w in combined_text for w in nature_words):
+                    resolved = "טבעי"
+                    source = "context_resolve"
+                elif any(w in combined_text for w in citizen_words):
+                    resolved = "התנהגות אזרח"
+                    source = "context_resolve"
+
+        if not resolved:
+            new_resp = resolve_responsibility(cat, desc)
+            if new_resp != "א.מ.ל":
+                resolved = new_resp
+                source = f"keyword:{new_resp}"
+
+        if resolved:
+            df.at[idx, "אחריות"] = resolved
+            df.at[idx, "אחריות_מקור"] = source
+
+    # Recompute confidence for rows that were resolved
+    _tier = {"low": 0, "medium": 1, "high": 2}
+    for idx in df.index[df["אחריות_מקור"] == "context_resolve"]:
+        row = df.loc[idx]
+        cat_src  = str(row.get("סיווג_מקור", ""))
+        resp_src = str(row.get("אחריות_מקור", ""))
+        addr_r   = str(row.get("מסלול_כתובת", ""))
+        cat_conf  = "high" if cat_src in ("map", "user_map") else ("medium" if cat_src == "topic_fallback" else "low")
+        resp_conf = "medium"
+        if addr_r in ("std", "intersection", "range"):
+            addr_conf = "high"
+        elif addr_r in ("apt_suffix", "multi"):
+            addr_conf = "medium"
+        elif addr_r == "landmark":
+            addr_conf = "medium" if row.get("רחוב_ראשי") else "low"
+        else:
+            addr_conf = "low"
+        df.at[idx, "_confidence"] = min([cat_conf, resp_conf, addr_conf], key=lambda x: _tier[x])
+
+    return df
+
+
+def _build_context_sentence(category: str, term: str, count: int, samples: list) -> str:
+    """
+    Build a human-readable context sentence for a Q&A question group.
+    Instead of "פניות שמזכירות 'פחים'" → produce something like:
+    "25 פניות בקטגוריה 'כלי אצירה פגומים' מתארות מצב הקשור ל'פחים'.
+     לפי התיאורים — האם הבעיה נגרמה ע"י צוות הפינוי, אזרח, או גורם אחר?"
+    """
+    cat_he = category if category else "לא ידועה"
+    sample_hint = ""
+    if samples:
+        short = samples[0][:80].strip()
+        if short:
+            sample_hint = f' (לדוגמה: "{short}")'
+    return (
+        f'{count} פניות בקטגוריה "{cat_he}" מתארות מצב הקשור ל"{term}"{sample_hint}. '
+        f'לפי התיאורים — האם הבעיה נגרמה ע"י העירייה (צוות פינוי/ניקוי), אזרח, או גורם טבעי?'
+    )
+
+
 def find_clusters(df: pd.DataFrame) -> dict:
     """
     Find groups of uncertain rows that a user answer can resolve.
@@ -791,11 +899,14 @@ def find_clusters(df: pd.DataFrame) -> dict:
 
             def _make_pg(g):
                 pool = [desc_list[i] for i in g["row_idxs"] if desc_list[i].strip()]
-                samp = _rng.sample(pool, min(3, len(pool))) if pool else []
+                samp = _rng.sample(pool, min(4, len(pool))) if pool else []
+                term = g["term"]
+                context_sentence = _build_context_sentence(cat, term, g["count"], samp)
                 return {
-                    "observation":  g["term"],
+                    "observation":  term,
                     "count":        g["count"],
                     "desc_samples": [s[:130] for s in samp],
+                    "context_sentence": context_sentence,
                 }
 
             pattern_groups = [_make_pg(g) for g in all_groups]
