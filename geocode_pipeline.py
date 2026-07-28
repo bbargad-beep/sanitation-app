@@ -55,6 +55,12 @@ except ImportError:
     HAS_PYPROJ = False
 
 try:
+    import geopandas as gpd
+    HAS_GEOPANDAS = True
+except ImportError:
+    HAS_GEOPANDAS = False
+
+try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -72,7 +78,7 @@ log = logging.getLogger("geocode_pipeline")
 #  CONFIGURATION
 # ============================================================================
 
-PIPELINE_VERSION = "3.0.0"
+PIPELINE_VERSION = "3.1.0"
 NOMINATIM_DELAY = 1.1       # seconds between Nominatim requests (rate limit)
 GIS_DELAY       = 0.4       # seconds between GIS portal requests
 NOMINATIM_AGENT = "herzliya_sanitation_municipal_app"
@@ -83,6 +89,234 @@ HERZLIYA_BOUNDS = {
     "lat_min": 32.14,  "lat_max": 32.20,
     "lon_min": 34.78,  "lon_max": 34.87,
 }
+
+LOCAL_ADDRESS_SHP = os.path.join(
+    os.path.dirname(__file__), "data", "address_points", "ktovot_point_hrz.shp"
+)
+
+# ============================================================================
+#  LOCAL MUNICIPAL ADDRESS DATABASE
+#  Official Herzliya building-entrance shapefile (14,547 points, ITM/EPSG:2039)
+#  Loaded once at first use; provides instant offline geocoding for the bulk
+#  of all addresses before any external API is called.
+# ============================================================================
+
+_LOCAL_DB_LOADED = False
+# {(street_code, bldg_num_str): (lat, lon)}
+_LOCAL_ADDR_IDX: dict = {}
+# {street_code: (centroid_lat, centroid_lon)}
+_LOCAL_STREET_CENTROID: dict = {}
+# {normalized_street_name: street_code}  — for name → code resolution
+_LOCAL_NAME_TO_CODE: dict = {}
+# {street_code: canonical_street_nam}
+_LOCAL_CODE_TO_NAME: dict = {}
+# {street_code: neighborhood (Text_)}
+_LOCAL_STREET_NEIGHBORHOOD: dict = {}
+# geopandas GeoDataFrame in WGS84 (for spatial queries)
+_LOCAL_GDF: object = None
+
+
+def _load_local_db() -> None:
+    global _LOCAL_DB_LOADED, _LOCAL_ADDR_IDX, _LOCAL_STREET_CENTROID
+    global _LOCAL_NAME_TO_CODE, _LOCAL_CODE_TO_NAME, _LOCAL_STREET_NEIGHBORHOOD, _LOCAL_GDF
+
+    if _LOCAL_DB_LOADED:
+        return
+
+    if not HAS_GEOPANDAS:
+        log.warning("geopandas not installed — local address DB unavailable")
+        _LOCAL_DB_LOADED = True
+        return
+
+    if not os.path.exists(LOCAL_ADDRESS_SHP):
+        log.warning(f"Local address shapefile not found at {LOCAL_ADDRESS_SHP}")
+        _LOCAL_DB_LOADED = True
+        return
+
+    try:
+        gdf = gpd.read_file(LOCAL_ADDRESS_SHP)
+        gdf = gdf.to_crs("EPSG:4326")   # reproject entire dataset in one call
+        gdf["_lat"] = gdf.geometry.y
+        gdf["_lon"] = gdf.geometry.x
+
+        for _, row in gdf.iterrows():
+            code = int(row["STREET_COD"]) if pd.notna(row["STREET_COD"]) else None
+            if code is None:
+                continue
+
+            # Building-level index — key on both raw BLDG_NUM and numeric bldg_numbe
+            raw_bldg = str(row["BLDG_NUM"]).strip() if pd.notna(row["BLDG_NUM"]) else ""
+            num_bldg = str(int(row["bldg_numbe"])) if pd.notna(row["bldg_numbe"]) else ""
+            lat, lon = round(row["_lat"], 7), round(row["_lon"], 7)
+
+            for key in filter(None, {raw_bldg, num_bldg}):
+                _LOCAL_ADDR_IDX[(code, key)] = (lat, lon)
+
+            # Name ↔ code mapping
+            name = str(row["street_nam"]).strip() if pd.notna(row["street_nam"]) else ""
+            if name and code not in _LOCAL_CODE_TO_NAME:
+                _LOCAL_CODE_TO_NAME[code] = name
+                _LOCAL_NAME_TO_CODE[name] = code
+
+            # Neighborhood (use first seen per street)
+            nbhd = str(row["Text_"]).strip() if pd.notna(row["Text_"]) else ""
+            if nbhd and code not in _LOCAL_STREET_NEIGHBORHOOD:
+                _LOCAL_STREET_NEIGHBORHOOD[code] = nbhd
+
+        # Street centroids — mean of all building points per street code
+        centroids = gdf.groupby("STREET_COD")[["_lat", "_lon"]].mean()
+        for code, row in centroids.iterrows():
+            _LOCAL_STREET_CENTROID[int(code)] = (round(row["_lat"], 7), round(row["_lon"], 7))
+
+        _LOCAL_GDF = gdf
+        log.info(
+            f"Local address DB loaded: {len(_LOCAL_ADDR_IDX)} address points, "
+            f"{len(_LOCAL_STREET_CENTROID)} street centroids"
+        )
+    except Exception as e:
+        log.warning(f"Failed to load local address DB: {e}")
+
+    _LOCAL_DB_LOADED = True
+
+
+def _resolve_street_code(street_name: str) -> Optional[int]:
+    """
+    Resolve a CRM street name to its municipal street code using:
+      1. Exact match against local DB name index
+      2. Word-set match (handles name-order reversals)
+      3. Fuzzy match (difflib, cutoff 0.82)
+      4. Fallback to STREET_REGISTRY (the קוד רחוב.xlsx registry)
+    """
+    if not street_name or street_name in ("nan", "None"):
+        return None
+
+    name = street_name.strip()
+
+    # 1. Exact
+    if name in _LOCAL_NAME_TO_CODE:
+        return _LOCAL_NAME_TO_CODE[name]
+
+    # 2. Word-set (order-insensitive)
+    name_words = frozenset(name.split())
+    if len(name_words) >= 2:
+        for cand, code in _LOCAL_NAME_TO_CODE.items():
+            if frozenset(cand.split()) == name_words:
+                return code
+
+    # 3. Fuzzy against local DB names
+    if HAS_DIFFLIB and _LOCAL_NAME_TO_CODE:
+        matches = difflib.get_close_matches(name, list(_LOCAL_NAME_TO_CODE.keys()), n=1, cutoff=0.82)
+        if matches:
+            return _LOCAL_NAME_TO_CODE[matches[0]]
+
+    # 4. Fall back to the קוד רחוב registry
+    _, code = _registry_resolve(name)
+    return code
+
+
+def _local_lookup(street_name: str, bldg_num) -> tuple:
+    """
+    Look up a single address in the local municipal DB.
+
+    Returns (lat, lon, method, precision, neighborhood):
+      method is one of: local_exact, local_nearest, local_street_centroid, None
+      precision is one of: address, near_address, street, None
+    """
+    _load_local_db()
+
+    code = _resolve_street_code(street_name)
+    if code is None:
+        return None, None, None, None, None
+
+    nbhd = _LOCAL_STREET_NEIGHBORHOOD.get(code)
+
+    # Normalise building number
+    raw = str(bldg_num).strip() if pd.notna(bldg_num) else ""
+    is_street_level = (raw in ("", "0", "nan", "None") or
+                       (raw.isdigit() and int(raw) == 0))
+
+    if is_street_level:
+        centroid = _LOCAL_STREET_CENTROID.get(code)
+        if centroid:
+            return centroid[0], centroid[1], "local_street_centroid", "street", nbhd
+        return None, None, None, None, None
+
+    # 1. Exact match (try raw string first, then numeric-only prefix)
+    m = re.match(r"(\d+)", raw)
+    num_only = m.group(1) if m else None
+
+    for key in filter(None, [raw, num_only]):
+        hit = _LOCAL_ADDR_IDX.get((code, key))
+        if hit:
+            return hit[0], hit[1], "local_exact", "address", nbhd
+
+    # 2. Nearest building number on the same street (numeric proximity)
+    if num_only:
+        target = int(num_only)
+        best_dist, best_coords = None, None
+        for (c, k), coords in _LOCAL_ADDR_IDX.items():
+            if c != code:
+                continue
+            m2 = re.match(r"(\d+)", k)
+            if m2:
+                dist = abs(int(m2.group(1)) - target)
+                if best_dist is None or dist < best_dist:
+                    best_dist, best_coords = dist, coords
+        if best_coords and best_dist is not None and best_dist <= 20:
+            return best_coords[0], best_coords[1], "local_nearest", "near_address", nbhd
+
+    # 3. Street centroid fallback
+    centroid = _LOCAL_STREET_CENTROID.get(code)
+    if centroid:
+        return centroid[0], centroid[1], "local_street_centroid", "street", nbhd
+
+    return None, None, None, None, None
+
+
+def local_address_pass(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pass 0.5: resolve addresses against the official Herzliya municipal address
+    point shapefile (14,547 building entrances).  Runs entirely offline and
+    covers the bulk of all addresses before any external API is called.
+
+    Resolves:
+      - Exact building address   → method=local_exact,          precision=address
+      - Nearest building (<= 20) → method=local_nearest,        precision=near_address
+      - Street-level / bldg==0   → method=local_street_centroid, precision=street
+      - Tags every resolved row with שכונה (municipal neighborhood from Text_)
+    """
+    _load_local_db()
+
+    for col in ["קו_רוחב", "קו_אורך", "geocode_method", PRECISION_COL,
+                "geocode_query", "שכונה"]:
+        if col not in df.columns:
+            df[col] = None
+
+    mask = df["קו_רוחב"].isna() | (df["קו_רוחב"].astype(str).str.strip() == "")
+    targets = df.index[mask].tolist()
+
+    resolved = 0
+    for idx in targets:
+        street = str(df.at[idx, "רחוב_ראשי"]).strip() if pd.notna(df.at[idx, "רחוב_ראשי"]) else ""
+        bldg = df.at[idx, "מספר_בית"] if "מספר_בית" in df.columns else None
+
+        if not street or street == "nan":
+            continue
+
+        lat, lon, method, precision, nbhd = _local_lookup(street, bldg)
+        if lat is not None:
+            df.at[idx, "קו_רוחב"] = lat
+            df.at[idx, "קו_אורך"] = lon
+            df.at[idx, "geocode_method"] = method
+            df.at[idx, PRECISION_COL] = precision
+            df.at[idx, "geocode_query"] = street
+            if nbhd and pd.isna(df.at[idx, "שכונה"]):
+                df.at[idx, "שכונה"] = nbhd
+            resolved += 1
+
+    log.info(f"Local address DB pass: resolved {resolved}/{len(targets)} rows")
+    return df
+
 
 # ============================================================================
 #  STREET NAME CORRECTIONS — loaded from corrections.json
@@ -1000,6 +1234,9 @@ def geocode_dataframe(df: pd.DataFrame,
 
     # Pass 0: Zero house-number pre-pass (house_num==0 → always street centroid)
     df = zero_housenumber_pass(df)
+
+    # Pass 0.5: Local municipal address DB (offline, instant, highest priority)
+    df = local_address_pass(df)
 
     # Pass 1: Nominatim
     if not skip_nominatim:
