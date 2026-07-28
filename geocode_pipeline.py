@@ -1283,22 +1283,23 @@ def geocode_dataframe(df: pd.DataFrame,
     # Pass 0.5: Local municipal address DB (offline, instant, highest priority)
     df = local_address_pass(df)
 
-    # Pass 1: Nominatim
+    # Pass 1: OSM centroids (offline, instant — mop up street-level gaps before network calls)
+    df = osm_centroid_pass(df)
+
+    # Pass 2: Herzliya GIS portal (auto-token via headless Playwright, no user interaction)
+    #   More authoritative than Nominatim for Herzliya addresses; runs before it.
+    if not skip_gis:
+        df = gis_rescue_pass(df, progress_cb,
+                             checkpoint_cb=checkpoint_cb,
+                             checkpoint_every=checkpoint_every)
+
+    # Pass 3: Nominatim — last automated resort for anything the local sources couldn't resolve
     if not skip_nominatim:
         if progress_cb:
             progress_cb("status", 0, 0, 0, 0)
         df = nominatim_pass(df, progress_cb,
                             checkpoint_cb=checkpoint_cb,
                             checkpoint_every=checkpoint_every)
-
-    # Pass 2: OSM centroids (always runs, it's offline and instant)
-    df = osm_centroid_pass(df)
-
-    # Pass 3: GIS rescue
-    if not skip_gis:
-        df = gis_rescue_pass(df, progress_cb,
-                             checkpoint_cb=checkpoint_cb,
-                             checkpoint_every=checkpoint_every)
 
     # Drop internal sentinel column
     if "_zero_housenumber" in df.columns:
