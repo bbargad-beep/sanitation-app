@@ -182,36 +182,81 @@ def _load_local_db() -> None:
 def _resolve_street_code(street_name: str) -> Optional[int]:
     """
     Resolve a CRM street name to its municipal street code using:
-      1. Exact match against local DB name index
-      2. Word-set match (handles name-order reversals)
-      3. Fuzzy match (difflib, cutoff 0.82)
-      4. Fallback to STREET_REGISTRY (the קוד רחוב.xlsx registry)
+      1. STREET_CORRECTIONS / GIS_MANUAL_MAP (known CRM variants)
+      2. Suffix stripping (e.g. "חנה רובינא -מתחם זרובבל" → "חנה רובינא")
+      3. Exact match against local DB name index
+      4. Word-set match (handles name-order reversals)
+      5. Fuzzy match (difflib, cutoff 0.78)
+      6. Fallback to STREET_REGISTRY (the קוד רחוב.xlsx registry)
+    Each step is tried on both the original and any corrected/stripped form.
     """
     if not street_name or street_name in ("nan", "None"):
         return None
 
+    def _lookup_name(name: str) -> Optional[int]:
+        name = name.strip()
+        if not name:
+            return None
+        # Exact
+        if name in _LOCAL_NAME_TO_CODE:
+            return _LOCAL_NAME_TO_CODE[name]
+        # Word-set (order-insensitive — handles person-name reversals)
+        name_words = frozenset(name.split())
+        if len(name_words) >= 2:
+            for cand, code in _LOCAL_NAME_TO_CODE.items():
+                if frozenset(cand.split()) == name_words:
+                    return code
+        # Fuzzy
+        if HAS_DIFFLIB and _LOCAL_NAME_TO_CODE:
+            matches = difflib.get_close_matches(name, list(_LOCAL_NAME_TO_CODE.keys()), n=1, cutoff=0.78)
+            if matches:
+                return _LOCAL_NAME_TO_CODE[matches[0]]
+        # Registry fallback
+        _, code = _registry_resolve(name)
+        return code
+
     name = street_name.strip()
 
-    # 1. Exact
-    if name in _LOCAL_NAME_TO_CODE:
-        return _LOCAL_NAME_TO_CODE[name]
+    # 1. Apply STREET_CORRECTIONS (CRM spelling → geocoding form)
+    corrected = STREET_CORRECTIONS.get(name)
+    if corrected:
+        result = _lookup_name(corrected)
+        if result:
+            return result
 
-    # 2. Word-set (order-insensitive)
-    name_words = frozenset(name.split())
-    if len(name_words) >= 2:
-        for cand, code in _LOCAL_NAME_TO_CODE.items():
-            if frozenset(cand.split()) == name_words:
-                return code
+    # 2. Apply GIS_MANUAL_MAP (skip None entries and intersection sentinels)
+    manual = GIS_MANUAL_MAP.get(name)
+    if manual and not manual.startswith("__INTERSECTION__"):
+        result = _lookup_name(manual)
+        if result:
+            return result
 
-    # 3. Fuzzy against local DB names
-    if HAS_DIFFLIB and _LOCAL_NAME_TO_CODE:
-        matches = difflib.get_close_matches(name, list(_LOCAL_NAME_TO_CODE.keys()), n=1, cutoff=0.82)
-        if matches:
-            return _LOCAL_NAME_TO_CODE[matches[0]]
+    # 3. Try original name
+    result = _lookup_name(name)
+    if result:
+        return result
 
-    # 4. Fall back to the קוד רחוב registry
-    _, code = _registry_resolve(name)
-    return code
+    # 4. Strip descriptive suffixes (e.g. "חנה רובינא -מתחם זרובבל" → "חנה רובינא")
+    stripped = re.sub(r'\s*[-–]\s*(כניסה|קומה|דירה|מתחם|מגדל|בניין)\b.*$', '', name).strip()
+    stripped = re.sub(r'\s+\d+\s*$', '', stripped).strip()
+    if '/' in stripped:
+        stripped = stripped[:stripped.index('/')].strip()
+    for suffix in [' ליד ', ' מול ', ' עד ', ' בגינת ', ' שליד ', ' בחלק ']:
+        if suffix in stripped:
+            stripped = stripped[:stripped.index(suffix)].strip()
+            break
+    if stripped != name:
+        result = _lookup_name(stripped)
+        if result:
+            return result
+        # Also try corrections on the stripped form
+        corrected2 = STREET_CORRECTIONS.get(stripped)
+        if corrected2:
+            result = _lookup_name(corrected2)
+            if result:
+                return result
+
+    return None
 
 
 def _local_lookup(street_name: str, bldg_num) -> tuple:
