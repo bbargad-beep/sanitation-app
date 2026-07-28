@@ -78,7 +78,7 @@ log = logging.getLogger("geocode_pipeline")
 #  CONFIGURATION
 # ============================================================================
 
-PIPELINE_VERSION = "3.1.0"
+PIPELINE_VERSION = "3.2.0"
 NOMINATIM_DELAY = 1.1       # seconds between Nominatim requests (rate limit)
 GIS_DELAY       = 0.4       # seconds between GIS portal requests
 NOMINATIM_AGENT = "herzliya_sanitation_municipal_app"
@@ -249,12 +249,77 @@ def _resolve_street_code(street_name: str) -> Optional[int]:
         result = _lookup_name(stripped)
         if result:
             return result
-        # Also try corrections on the stripped form
         corrected2 = STREET_CORRECTIONS.get(stripped)
         if corrected2:
             result = _lookup_name(corrected2)
             if result:
                 return result
+
+    # 5. Strip parenthetical notes — "ניסנוב 0(מקלט 118)" → "ניסנוב"
+    no_paren = re.sub(r'\s*\([^)]*\)\s*', ' ', name).strip()
+    no_paren = re.sub(r'\s+\d+\s*$', '', no_paren).strip()
+    if no_paren and no_paren != name:
+        result = _lookup_name(no_paren)
+        if result:
+            return result
+
+    # 6. Intersection shorthand — "פינסקר פ זבוטינסקי" → try "פינסקר"
+    for sep in [' פ ', ' פ.', " פ'"]:
+        if sep in name:
+            first_street = name[:name.index(sep)].strip()
+            if first_street:
+                result = _lookup_name(first_street)
+                if result:
+                    return result
+                c2 = STREET_CORRECTIONS.get(first_street)
+                if c2:
+                    result = _lookup_name(c2)
+                    if result:
+                        return result
+            break
+
+    # 7. Comma/dash number lists — "לייב יפה 52,54,56" → try "לייב יפה"
+    list_match = re.match(r'^(.+?)\s+\d+\s*[,/\-]\s*\d+', name)
+    if list_match:
+        stem = list_match.group(1).strip()
+        result = _lookup_name(stem)
+        if result:
+            return result
+        c2 = STREET_CORRECTIONS.get(stem)
+        if c2:
+            result = _lookup_name(c2)
+            if result:
+                return result
+
+    # 8. Entrance/floor suffix — "נורדאו 18 כניסה ב" → try "נורדאו"
+    entrance_match = re.match(r'^(.+?)\s+\d+\s*(כניסה|קומה|דירה)\b', name)
+    if entrance_match:
+        stem = entrance_match.group(1).strip()
+        result = _lookup_name(stem)
+        if result:
+            return result
+
+    # 9. "כל הרחוב" / "לאורך" / "בכל" — "אנילביץ מרדכי כל הרחוב" → "אנילביץ מרדכי"
+    whole_street = re.sub(r'\s+(כל הרחוב|לאורך כל הרחוב|בכל הרחוב|ויתקין בכל הרחוב)\s*$', '', name).strip()
+    if whole_street != name:
+        result = _lookup_name(whole_street)
+        if result:
+            return result
+
+    # 10. Second street appended — "יגאל אלון סוקולוב" → try progressively
+    #     shorter prefixes as candidate street names
+    words = name.split()
+    if len(words) >= 3:
+        for i in range(len(words) - 1, 1, -1):
+            candidate = ' '.join(words[:i])
+            result = _lookup_name(candidate)
+            if result:
+                return result
+            c2 = STREET_CORRECTIONS.get(candidate)
+            if c2:
+                result = _lookup_name(c2)
+                if result:
+                    return result
 
     return None
 
@@ -349,6 +414,16 @@ def local_address_pass(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         lat, lon, method, precision, nbhd = _local_lookup(street, bldg)
+
+        # If the street field has an embedded number (e.g. "נורדאו 18 כניסה ב"
+        # parsed as street="נורדאו 18 כניסה ב", bldg=None), try to extract it
+        if lat is None and (not bldg or str(bldg).strip() in ("", "0", "nan", "None")):
+            em = re.match(r'^(.+?)\s+(\d+)', street)
+            if em:
+                extracted_street = em.group(1).strip()
+                extracted_bldg = em.group(2)
+                lat, lon, method, precision, nbhd = _local_lookup(extracted_street, extracted_bldg)
+
         if lat is not None:
             df.at[idx, "קו_רוחב"] = lat
             df.at[idx, "קו_אורך"] = lon

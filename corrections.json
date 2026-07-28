@@ -421,9 +421,9 @@
   },
   "פסמן משה": {
     "status": "resolvable",
-    "note": "",
+    "note": "CRM reverses name — shapefile uses last name only",
     "nominatim": "משה פסמן",
-    "gis": null
+    "gis": "פסמן"
   },
   "פתח תקוה": {
     "status": "resolvable",
