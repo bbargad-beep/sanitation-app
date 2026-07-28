@@ -556,5 +556,137 @@
     "note": "",
     "nominatim": null,
     "gis": null
+  },
+  "לייב יפה": {
+    "status": "resolvable",
+    "note": "CRM drops first name",
+    "nominatim": "אריה לייב יפה",
+    "gis": "יפה אריה לייב"
+  },
+  "ש\"י עגנון": {
+    "status": "resolvable",
+    "note": "abbrev for שמואל יוסף עגנון",
+    "nominatim": "עגנון",
+    "gis": "עגנון"
+  },
+  "אלתרמן": {
+    "status": "resolvable",
+    "note": "abbrev for נתן אלתרמן",
+    "nominatim": "אלתרמן נתן",
+    "gis": "אלתרמן נתן"
+  },
+  "א.ד גורדון": {
+    "status": "resolvable",
+    "note": "abbrev for אהרון דוד גורדון",
+    "nominatim": "גורדון א ד",
+    "gis": "גורדון א ד"
+  },
+  "בן סרוק": {
+    "status": "resolvable",
+    "note": "abbrev for מנחם בן סרוק",
+    "nominatim": "בן סרוק מנחם",
+    "gis": "בן סרוק מנחם"
+  },
+  "ש.ז.לוין": {
+    "status": "resolvable",
+    "note": "abbrev — check OSM form",
+    "nominatim": "לוין שמריהו זלמן",
+    "gis": null
+  },
+  "שדרות ח\"ן": {
+    "status": "resolvable",
+    "note": "CRM abbreviation for שדרות חן",
+    "nominatim": "שד' ח\"ן",
+    "gis": "שד' ח\"ן"
+  },
+  "ליברמן": {
+    "status": "resolvable",
+    "note": "abbrev for ישראל ליברמן",
+    "nominatim": "ליברמן ישראל",
+    "gis": "ליברמן ישראל"
+  },
+  "י.ל.פרץ": {
+    "status": "resolvable",
+    "note": "check — may be פרץ not גורדון",
+    "nominatim": "י.ל. גורדון",
+    "gis": null
+  },
+  "מובשוביץ": {
+    "status": "resolvable",
+    "note": "abbrev for בנימין מובשוביץ",
+    "nominatim": "מובשוביץ בנימין",
+    "gis": "מובשוביץ בנימין"
+  },
+  "יאיר שטרן": {
+    "status": "resolvable",
+    "note": "not in shapefile — Nominatim only",
+    "nominatim": "יאיר שטרן",
+    "gis": null
+  },
+  "שפירא": {
+    "status": "resolvable",
+    "note": "abbrev — assuming צבי שפירא",
+    "nominatim": "שפירא צבי",
+    "gis": "שפירא צבי"
+  },
+  "הרב הלפרין": {
+    "status": "resolvable",
+    "note": "abbrev for הרב מרדכי הלפרין",
+    "nominatim": "הרב הלפרין מרדכי",
+    "gis": "הרב הלפרין מרדכי"
+  },
+  "בן שלום": {
+    "status": "resolvable",
+    "note": "abbrev for מאיר בן שלום",
+    "nominatim": "מאיר בן-שלום",
+    "gis": "מאיר בן-שלום"
+  },
+  "טבנקין": {
+    "status": "resolvable",
+    "note": "abbrev for יצחק טבנקין",
+    "nominatim": "טבנקין יצחק",
+    "gis": "טבנקין יצחק"
+  },
+  "מנדלבלט": {
+    "status": "resolvable",
+    "note": "abbrev for צבי מנדלבלט",
+    "nominatim": "מנדלבלט צבי",
+    "gis": "מנדלבלט צבי"
+  },
+  "יעקב דורי": {
+    "status": "resolvable",
+    "note": "CRM full name, shapefile uses last name only",
+    "nominatim": "דורי",
+    "gis": "דורי"
+  },
+  "אופיר סמטה": {
+    "status": "resolvable",
+    "note": "CRM adds סמטה suffix",
+    "nominatim": "אופיר",
+    "gis": "אופיר"
+  },
+  "בן ציון מיכאלי": {
+    "status": "resolvable",
+    "note": "check — fuzzy match uncertain",
+    "nominatim": "בן יוסף שלמה",
+    "gis": "בן יוסף שלמה"
+  },
+  "הרצפלד": {
+    "status": "resolvable",
+    "note": "abbrev for אברהם הרצפלד",
+    "nominatim": "הרצפלד אברהם",
+    "gis": "הרצפלד אברהם"
+  },
+  "משה דיין": {
+    "status": "resolvable",
+    "note": "not in shapefile — Nominatim only",
+    "nominatim": "משה דיין",
+    "gis": null
+  },
+  "משה לוי": {
+    "status": "resolvable",
+    "note": "full shapefile name",
+    "nominatim": "רא\"ל משה לוי",
+    "gis": "רא\"ל משה לוי"
   }
 }
