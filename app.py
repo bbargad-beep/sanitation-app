@@ -607,11 +607,14 @@ def _find_street_variants(df: pd.DataFrame) -> list:
 
 # ── Colour maps for semantic columns ────────────────────────────────────────
 _RESP_BG = {
-    "כשל עירוני":    "#dbeafe",
-    "התנהגות אזרח": "#ffedd5",
-    "טבעי":          "#d1fae5",
-    "לא רלוונטי":   "#f1f5f9",
-    "א.מ.ל":         "#fef9c3",
+    "עירייה":          "#dbeafe",
+    "התנהגות אזרח":   "#ffedd5",
+    "טבעי":            "#d1fae5",
+    "בקשה מהעירייה":  "#f1f5f9",
+    # legacy labels — kept for backward compatibility with older pickles
+    "כשל עירוני":      "#dbeafe",
+    "לא רלוונטי":      "#f1f5f9",
+    "א.מ.ל":           "#fef9c3",
 }
 _CONF_BG = {"high": "#d1fae5", "medium": "#dbeafe", "low": "#ffedd5"}
 _FLAG_BG = {"block": "#fee2e2", "warn": "#fef3c7", "":  ""}
@@ -1293,14 +1296,14 @@ elif stage == "clean":
     _has_questions = bool(_clusters["unknown_subtopics"] or _clusters["unresolved_resp"] or _st_vars)
 
     _TIP_RESP = _tip(
-        "<strong>כשל עירוני</strong> — העירייה לא ביצעה את עבודתה: "
+        "<strong>עירייה</strong> — העירייה לא ביצעה את עבודתה: "
         "פינוי לא תקין, ניקוי שלא נעשה, ציוד שהתקלקל, עובדי ניקוי שלא הגיעו<br><br>"
         "<strong>התנהגות אזרח</strong> — אזרח גרם לבעיה: "
         "זרק אשפה, פיזר פסולת, גנב ציוד, גרם נזק<br><br>"
         "<strong>טבעי</strong> — הטבע הוא הגורם: "
         "גשם, רוח, עלים נשרו, ציפורים, בעלי חיים<br><br>"
-        "<strong>לא רלוונטי</strong> — האחריות לא שייכת לביצועים: "
-        "בקשות שירות, תביעות נזק"
+        "<strong>בקשה מהעירייה</strong> — בקשת שירות או תחזוקה: "
+        "מילוי שקיות כלבים, פינוי חריג, ציוד ציבורי"
     )
     _TIP_CAT = _tip(
         "<strong>אי פינוי</strong> — אשפה לא פונתה במועד הקבוע<br>"
@@ -1455,10 +1458,10 @@ elif stage == "clean":
             )
             _RESP_HELP = (
                 "לפי תוכן הפנייה, מי גרם לבעיה?\n\n"
-                "1. **כשל עירוני** — העירייה לא ביצעה (פינוי/ניקוי שלא נעשה, ציוד שהתקלקל)\n\n"
+                "1. **עירייה** — העירייה לא ביצעה (פינוי/ניקוי שלא נעשה, ציוד שהתקלקל)\n\n"
                 "2. **התנהגות אזרח** — אדם גרם לבעיה (זרק אשפה, פיזר פסולת)\n\n"
                 "3. **טבעי** — הטבע גרם (גשם, רוח, עלים, ציפורים)\n\n"
-                "4. **לא רלוונטי** — בקשת שירות או תביעה\n\n"
+                "4. **בקשה מהעירייה** — בקשת שירות או תחזוקה\n\n"
                 "אם לא בטוח — השאר 'לא ידוע'."
             )
             _RESP_OPTS = ["— לא ידוע —"] + cp.KNOWN_RESPONSIBILITIES
@@ -2237,7 +2240,7 @@ elif stage == "output":
             tc, tcn = _top(d["תת_נושא_חדש"])
             ts, tsn = _top(d["רחוב_ראשי"])
             recur = d["תלונה_חוזרת"].mean()*100 if "תלונה_חוזרת" in d else 0
-            muni  = (d["אחריות"]=="כשל עירוני").mean()*100 if "אחריות" in d else 0
+            muni  = (d["אחריות"].isin(["עירייה", "כשל עירוני"])).mean()*100 if "אחריות" in d else 0
             same  = (d["תלונה_ביום_פינוי"]==1).mean()*100 if "תלונה_ביום_פינוי" in d else 0
 
             m1,m2,m3,m4,m5 = st.columns(5)
@@ -2263,8 +2266,10 @@ elif stage == "output":
             with cb:
                 rc = d["אחריות"].value_counts().reset_index()
                 rc.columns = ["אחריות","מספר"]
-                cmap = {"כשל עירוני":BLUE,"התנהגות אזרח":AMBER,"טבעי":GREEN,
-                        "לא רלוונטי":GRAY,"א.מ.ל":RED}
+                cmap = {"עירייה":BLUE,"התנהגות אזרח":AMBER,"טבעי":GREEN,
+                        "בקשה מהעירייה":GRAY,
+                        # legacy
+                        "כשל עירוני":BLUE,"לא רלוונטי":GRAY,"א.מ.ל":RED}
                 fig = px.pie(rc, names="אחריות", values="מספר", hole=0.45,
                              color="אחריות", color_discrete_map=cmap)
                 fig.update_traces(textposition="outside", textinfo="label+percent")
