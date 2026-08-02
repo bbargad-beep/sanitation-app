@@ -10,3 +10,10 @@ geopy
 pyproj
 scikit-learn
 playwright
+
+# Local municipal address database (data/address_points/ktovot_point_hrz.shp).
+# Without these, geocode_pipeline._load_local_db() silently disables the
+# offline address pass and every lookup falls through to remote APIs.
+geopandas
+shapely
+pyogrio

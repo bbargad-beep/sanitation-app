@@ -832,6 +832,99 @@ def _render_stepper_nav(current: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  CAPABILITY PROBE
+#  Several geocoding sources are optional at import time and degrade silently
+#  when their dependency is missing.  Probe them once per session and show the
+#  result, so a degraded run is visible rather than merely slower.
+# ══════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _probe_capabilities() -> dict:
+    """Return {key: (ok: bool, detail: str)} for each optional subsystem."""
+    caps = {}
+
+    # ── Local municipal address DB (geopandas + shapefile) ──────────────
+    try:
+        import geopandas  # noqa: F401
+        shp = gp.LOCAL_ADDRESS_SHP
+        if not os.path.exists(shp):
+            caps["local_db"] = (False, "קובץ הכתובות העירוני חסר מהפריסה")
+        else:
+            gp._load_local_db()
+            n = len(gp._LOCAL_ADDR_IDX)
+            if n == 0:
+                caps["local_db"] = (False, "קובץ הכתובות נטען אך ריק")
+            else:
+                caps["local_db"] = (True, f"{n:,} כתובות")
+    except ImportError:
+        caps["local_db"] = (False, "geopandas לא מותקן")
+    except Exception as e:
+        caps["local_db"] = (False, f"שגיאת טעינה: {type(e).__name__}")
+
+    # ── GIS portal rescue (Playwright + Chromium binary) ────────────────
+    try:
+        from playwright.sync_api import sync_playwright
+        exe = None
+        try:
+            with sync_playwright() as p:
+                exe = p.chromium.executable_path
+        except Exception:
+            pass
+        if exe and os.path.exists(exe):
+            caps["gis"] = (True, "דפדפן זמין")
+        else:
+            caps["gis"] = (False, "דפדפן Chromium לא הותקן בשרת")
+    except ImportError:
+        caps["gis"] = (False, "playwright לא מותקן")
+    except Exception as e:
+        caps["gis"] = (False, f"לא זמין: {type(e).__name__}")
+
+    # ── Interactive table renderer ──────────────────────────────────────
+    caps["aggrid"] = (
+        (True, "טבלה אינטראקטיבית")
+        if _AGGRID_OK else
+        (False, "streamlit-aggrid לא מותקן — טבלה בסיסית")
+    )
+
+    return caps
+
+
+_CAP_LABELS = {
+    "local_db": "מאגר כתובות עירוני",
+    "gis":      "פורטל GIS",
+    "aggrid":   "תצוגת טבלה",
+}
+
+
+def _render_capability_banner():
+    """One-line status strip for the optional subsystems."""
+    try:
+        caps = _probe_capabilities()
+    except Exception:
+        return
+
+    degraded = [k for k, (ok, _) in caps.items() if not ok]
+    parts = []
+    for key, (ok, detail) in caps.items():
+        icon = "🟢" if ok else "🔴"
+        parts.append(f"{icon} {_CAP_LABELS.get(key, key)} — {detail}")
+    line = " &nbsp;·&nbsp; ".join(parts)
+
+    if degraded:
+        note = ""
+        if "local_db" in degraded or "gis" in degraded:
+            note = ("<br><span style='font-size:.85em'>מקורות גאוקוד חסרים — "
+                    "האיתור יסתמך על שירות חיצוני איטי יותר ופחות מדויק. "
+                    "התוצאות עדיין תקפות, אך הכיסוי עשוי להיות נמוך יותר.</span>")
+        st.markdown(
+            f'<div class="banner-warn">⚠️ <strong>חלק מהמקורות אינם פעילים</strong><br>{line}{note}</div>',
+            unsafe_allow_html=True)
+    else:
+        with st.expander("🟢 כל המקורות פעילים", expanded=False):
+            st.markdown(line.replace(" &nbsp;·&nbsp; ", "  \n"))
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  HEADER + STEPPER
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -846,6 +939,8 @@ if not MODULES_OK:
     st.markdown(f'<div class="banner-error">❌ שגיאה בטעינת מודולים: {_IMPORT_ERR}</div>',
                 unsafe_allow_html=True)
     st.stop()
+
+_render_capability_banner()
 
 # Show recovery banner if we restored from disk
 if (st.session_state.get("df") is not None
