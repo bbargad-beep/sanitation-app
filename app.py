@@ -1637,6 +1637,7 @@ elif stage == "clean":
 
         _qa_answers: dict = {}
         _q_num = 0
+        _q_engaged = 0  # questions where user chose a non-default option
 
         # ── Type 1: Street name variants ──────────────────────────────────
         if _st_vars:
@@ -1707,6 +1708,7 @@ elif stage == "clean":
                 # Accept any choice that isn't "leave as-is" — even if the answer
                 # equals _can, we still need to remap all other variants to it.
                 if _ans != "השאר כמו שיש":
+                    _q_engaged += 1
                     for _raw_v in _deduped:
                         if _raw_v != _ans:
                             _qa_answers[f"street:{_raw_v}"] = _ans
@@ -1737,6 +1739,7 @@ elif stage == "clean":
                     help="בחר את הקטגוריה המתאימה.",
                 )
                 if _ans != "השאר לבדיקה ב-Excel":
+                    _q_engaged += 1
                     _qa_answers[f"subtopic:{_sub}"] = _ans
 
         # ── Type 3: Ambiguous responsibility — context-rich questions ─────
@@ -1791,6 +1794,7 @@ elif stage == "clean":
                             _RESP_OPTS, key=f"qa_rterm_{_cat}_{_obs}", help=_RESP_HELP,
                         )
                         if _ans_pg != _RESP_OPTS[0]:
+                            _q_engaged += 1
                             _qa_answers[f"resp_term:{_cat}:{_obs}"] = _ans_pg
 
                     # Remainder — goes to manual review in Excel
@@ -1815,13 +1819,13 @@ elif stage == "clean":
         # Progress bar
         st.markdown("")
         _n_answered = len(_qa_answers)
-        _pct_answered = round(_n_answered / max(_total_q_count, 1) * 100)
+        _pct_answered = round(_q_engaged / max(_total_q_count, 1) * 100)
         st.progress(min(_pct_answered, 100) / 100,
-                    text=f"📊 ענית על {_n_answered} מתוך {_total_q_count} שאלות ({_pct_answered}%)")
+                    text=f"📊 ענית על {_q_engaged} מתוך {_total_q_count} שאלות ({_pct_answered}%)")
 
-        _btn_label = f"✅ החל תשובות ({_n_answered} תשובות)" if _n_answered else "✅ החל תשובות"
+        _btn_label = f"✅ החל תשובות ({_q_engaged} תשובות)" if _q_engaged else "✅ החל תשובות"
         if st.button(_btn_label, type="primary", use_container_width=True,
-                     disabled=(_n_answered == 0)):
+                     disabled=(_q_engaged == 0)):
             with st.spinner("מעבד תשובות ומעדכן נתונים..."):
                 st.session_state["_df_before_qa"] = df.copy()
                 _updated_df = cp.apply_user_answers(df, _qa_answers)
