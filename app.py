@@ -43,6 +43,7 @@ try:
     import flags as fl
     import heatmap as hm
     import audit_log as al
+    import spot_check as sc
     MODULES_OK = True
 except Exception as e:
     MODULES_OK = False
@@ -176,6 +177,8 @@ _PERSIST_KEYS = [
     "stage", "df", "filename", "stats", "run_id",
     "_clean_stats", "_context_resolved", "_df_before_qa", "_qa_applied",
     "enrich_fingerprint",
+    "_spotcheck_clean", "_spotcheck_geocode",
+    "acceptance_card_clean", "acceptance_card_geocode",
 ]
 
 
@@ -557,6 +560,38 @@ def excel_bytes(df: pd.DataFrame, stats: dict) -> bytes:
         ws_a = writer.sheets["יומן_תיקונים"]
         for j, col in enumerate(audit_df.columns):
             ws_a.write(0, j, col, fmt_hdr)
+
+        # Acceptance cards — one sheet per completed spot-check
+        for _card_key, _sheet_name in [
+            ("acceptance_card_clean", "אישור_ניקוי"),
+            ("acceptance_card_geocode", "אישור_גאוקוד"),
+        ]:
+            _card = st.session_state.get(_card_key)
+            if _card:
+                _card_rows = [
+                    ("שלב", _card["stage"]),
+                    ("תאריך", _card["timestamp"][:19].replace("T", " ")),
+                    ("טענה", _card["claim"]),
+                    ("עבר", "כן" if _card["passed"] else "לא"),
+                    ("סף דחייה (p)", f'{_card["p_reject"]*100:.0f}%'),
+                    ("סיכון צרכן (β)", f'{_card["beta"]*100:.0f}%'),
+                    ("סה״כ נבדקו", _card["total_reviewed"]),
+                    ("סה״כ שגיאות", _card["total_defects"]),
+                    ("מזהה ריצה", _card.get("run_id", "")),
+                ]
+                _card_df = pd.DataFrame(_card_rows, columns=["שדה", "ערך"])
+                _card_df.to_excel(writer, index=False, sheet_name=_sheet_name,
+                                 startrow=0)
+                # Strata detail below the summary
+                _strata_df = sc.card_to_dataframe(_card)
+                _strata_df.to_excel(writer, index=False, sheet_name=_sheet_name,
+                                    startrow=len(_card_rows) + 2)
+                ws_c = writer.sheets[_sheet_name]
+                ws_c.set_column("A:A", 30)
+                ws_c.set_column("B:B", 50)
+                for j in range(2):
+                    ws_c.write(0, j, _card_df.columns[j], fmt_hdr)
+
     return buf.getvalue()
 
 
@@ -1164,6 +1199,8 @@ elif stage == "clean":
         'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#1e40af;">🙋 שאלות</a>'
         '<a href="#section-download" style="text-decoration:none;background:#f8fafc;border:1px solid #e2e8f0;'
         'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#475569;">📤 הורדה</a>'
+        '<a href="#section-spotcheck" style="text-decoration:none;background:#faf5ff;border:1px solid #d8b4fe;'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#6b21a8;">🔍 בדיקת דגימה</a>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2013,6 +2050,180 @@ elif stage == "clean":
             f'לחלופין — לחצו "החרג ועבור הלאה" אם הבעיות ידועות ואינן מונעות גאוקוד.</div>',
             unsafe_allow_html=True)
 
+    # ════════════════════════════════════════════════════════
+    #  SPOT-CHECK — human oracle on a statistical sample
+    # ════════════════════════════════════════════════════════
+
+    st.markdown('<div id="section-spotcheck"></div>', unsafe_allow_html=True)
+
+    # Only meaningful when provenance columns exist.
+    if _prov_level == "none":
+        with st.expander("🔍 בדיקת דגימה — לא זמין לקובץ זה", expanded=False):
+            st.markdown(
+                f'<div class="banner-warn">ℹ️ {_provenance_notice(_prov_level, _prov_missing)}</div>',
+                unsafe_allow_html=True)
+    else:
+        _sc_key = "_spotcheck_clean"
+        _sc_state = st.session_state.get(_sc_key, {})
+        _sc_plan = _sc_state.get("plan")
+        _sc_verdicts = _sc_state.get("verdicts", {})
+        _sc_card = _sc_state.get("card")
+
+        _sc_title = "🔍 בדיקת דגימה — ודא שהמערכת סיווגה נכון"
+        if _sc_card:
+            _sc_title += " ✅" if _sc_card["passed"] else " ❌"
+        with st.expander(_sc_title, expanded=not bool(_sc_card)):
+            st.markdown(
+                '<div class="step-card"><h4>מה זה?</h4>'
+                '<p>המערכת בוחרת מדגם אקראי מתוך השורות שעובדו אוטומטית, '
+                'מחולק לפי שיטת ההחלטה (סיווג, אחריות). '
+                'תצטרך לבדוק כ-<strong>50 שורות</strong> — '
+                'לכל שורה תראה את הטקסט המקורי מול ההחלטה של המערכת, '
+                'ותלחץ "נכון" או "שגוי".</p>'
+                '<p>אם 0 שגיאות נמצאו, תקבל <strong>אישור סטטיסטי</strong> '
+                'ששיעור השגיאה בכל הנתונים נמוך מ-5% (ברמת ביטחון 90%).</p></div>',
+                unsafe_allow_html=True)
+
+            if not _sc_plan:
+                if st.button("▶ התחל בדיקת דגימה — ניקוי", type="primary",
+                             use_container_width=True, key="sc_clean_start"):
+                    plan = sc.build_sample_plan(df, sc.CLEAN_STRATA_COLS)
+                    st.session_state[_sc_key] = {"plan": plan, "verdicts": {}, "card": None}
+                    st.rerun()
+
+            elif not _sc_card:
+                # ── Walk through the sample ─────────────────────────────────
+                # Flatten all (stratum_idx, row_pos) into a linear queue
+                _queue = []
+                for si, stratum in enumerate(_sc_plan):
+                    for ri, idx in enumerate(stratum["sample_indices"]):
+                        verdict_key = f"{si}:{ri}"
+                        if verdict_key not in _sc_verdicts:
+                            _queue.append((si, ri, idx, verdict_key))
+
+                total_to_review = sum(len(s["sample_indices"]) for s in _sc_plan)
+                done_count = len(_sc_verdicts)
+
+                if _queue:
+                    si, ri, idx, vkey = _queue[0]
+                    stratum = _sc_plan[si]
+
+                    # Check if this stratum already has a defect — curtail
+                    _stratum_defects = sum(
+                        1 for k, v in _sc_verdicts.items()
+                        if k.startswith(f"{si}:") and v == "wrong"
+                    )
+                    if _stratum_defects > 0:
+                        # Skip rest of this stratum, move to next
+                        for _, ri2, _, vk2 in _queue:
+                            if vk2.startswith(f"{si}:"):
+                                _sc_verdicts[vk2] = "skipped"
+                        st.session_state[_sc_key]["verdicts"] = _sc_verdicts
+                        st.rerun()
+
+                    # Progress
+                    st.progress(done_count / total_to_review if total_to_review else 1.0)
+                    st.markdown(
+                        f'<div style="text-align:center;font-size:.85rem;margin-bottom:.8rem;">'
+                        f'שורה {done_count + 1} מתוך {total_to_review} · '
+                        f'שכבה: <strong>{stratum["label"]}</strong> '
+                        f'({stratum["lot_size"]:,} שורות במנה)</div>',
+                        unsafe_allow_html=True)
+
+                    review = sc.row_for_review(df, idx, "clean")
+
+                    # Two-column layout: original (right) | decision (left)
+                    col_orig, col_dec = st.columns(2)
+                    with col_orig:
+                        st.markdown("**📄 טקסט מקורי מה-CRM:**")
+                        for k, v in review["original"].items():
+                            if v:
+                                st.markdown(f"**{k}:** {v}")
+                    with col_dec:
+                        st.markdown("**🤖 החלטת המערכת:**")
+                        for k, v in review["decision"].items():
+                            if v:
+                                st.markdown(f"**{k}:** {v}")
+
+                    # Verdict buttons
+                    b1, b2, b3 = st.columns([1, 1, 2])
+                    with b1:
+                        if st.button("✅ נכון", type="primary", use_container_width=True,
+                                     key=f"sc_ok_{vkey}"):
+                            _sc_verdicts[vkey] = "correct"
+                            st.session_state[_sc_key]["verdicts"] = _sc_verdicts
+                            st.rerun()
+                    with b2:
+                        if st.button("❌ שגוי", use_container_width=True,
+                                     key=f"sc_wrong_{vkey}"):
+                            _sc_verdicts[vkey] = "wrong"
+                            st.session_state[_sc_key]["verdicts"] = _sc_verdicts
+                            st.rerun()
+                    with b3:
+                        if st.button("⏭️ דלג (לא בטוח)", use_container_width=True,
+                                     key=f"sc_skip_{vkey}"):
+                            _sc_verdicts[vkey] = "correct"
+                            st.session_state[_sc_key]["verdicts"] = _sc_verdicts
+                            st.rerun()
+
+                else:
+                    # All reviewed — build the acceptance card
+                    strata_results = []
+                    for si, stratum in enumerate(_sc_plan):
+                        n_reviewed = 0
+                        n_defects = 0
+                        for ri in range(len(stratum["sample_indices"])):
+                            v = _sc_verdicts.get(f"{si}:{ri}", "correct")
+                            if v == "skipped":
+                                continue
+                            n_reviewed += 1
+                            if v == "wrong":
+                                n_defects += 1
+                        strata_results.append({
+                            "label": stratum["label"],
+                            "lot_size": stratum["lot_size"],
+                            "sample_n": stratum["sample_n"],
+                            "reviewed": n_reviewed,
+                            "defects": n_defects,
+                            "verdict": "pass" if n_defects == 0 else "fail",
+                            "sample_tickets": stratum["sample_tickets"],
+                        })
+                    card = sc.build_acceptance_card(
+                        "clean", strata_results,
+                        sc.DEFAULT_P_REJECT, sc.DEFAULT_BETA,
+                        run_id=st.session_state.get("run_id", ""),
+                    )
+                    st.session_state[_sc_key]["card"] = card
+                    st.session_state["acceptance_card_clean"] = card
+                    _save_state()
+                    st.rerun()
+
+            else:
+                # ── Show completed card ─────────────────────────────────────
+                card = _sc_card
+                if card["passed"]:
+                    st.markdown(
+                        f'<div style="background:#d1fae5;border:2px solid #059669;'
+                        f'border-radius:10px;padding:1.2rem;text-align:center;'
+                        f'font-size:1.1rem;margin-bottom:1rem;">'
+                        f'✅ <strong>{card["claim"]}</strong></div>',
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        f'<div style="background:#fee2e2;border:2px solid #dc2626;'
+                        f'border-radius:10px;padding:1.2rem;text-align:center;'
+                        f'font-size:1.1rem;margin-bottom:1rem;">'
+                        f'❌ <strong>{card["claim"]}</strong></div>',
+                        unsafe_allow_html=True)
+
+                _table(sc.card_to_dataframe(card))
+
+                if st.button("🔄 בצע בדיקה מחדש", use_container_width=True,
+                             key="sc_clean_redo"):
+                    st.session_state.pop(_sc_key, None)
+                    st.session_state.pop("acceptance_card_clean", None)
+                    st.rerun()
+
     # ── Navigation CTAs ─────────────────────────────────────────────────────
     st.markdown("---")
     _ready = (n_block == 0)
@@ -2604,23 +2815,160 @@ elif stage == "output":
 
     # ── QA SAMPLING TAB ─────────────────────────────────────────────────────
     with tab_qa:
-        import acceptance_sampling as qs
+        st.markdown(
+            '<div class="step-card"><h4>🔍 בדיקת דגימה — גאוקוד</h4>'
+            '<p>בדוק מדגם אקראי של שורות שגואוקדו אוטומטית. '
+            'לכל שורה תראה את הכתובת המקורית מול הכתובת והקואורדינטות '
+            'שהמערכת מצאה, ותלחץ "נכון" או "שגוי".</p>'
+            '<p>אם 0 שגיאות נמצאו, תקבל <strong>אישור סטטיסטי</strong> '
+            'ששיעור השגיאה נמוך מ-5% (ברמת ביטחון 90%).</p></div>',
+            unsafe_allow_html=True)
 
-        st.markdown('<div class="step-card"><h4>דגימת קבלה — אפס פגמים</h4>'
-                    '<p>בוחנת מדגם אקראי מכל רמת גאוקוד. פסיקה: ✅ קבל (0 פגמים) '
-                    'או ❌ דחה (פגם ≥1). גודל המדגם מחושב לפי סיכון צרכן β=10%.</p></div>',
+        _gc_key = "_spotcheck_geocode"
+        _gc_state = st.session_state.get(_gc_key, {})
+        _gc_plan = _gc_state.get("plan")
+        _gc_verdicts = _gc_state.get("verdicts", {})
+        _gc_card = _gc_state.get("card")
+
+        # Check that geocode columns exist
+        _gc_has_data = "מסלול_כתובת" in df.columns or "דיוק_גאוקוד" in df.columns
+
+        if not _gc_has_data:
+            st.info("עמודות הגאוקוד אינן קיימות בקובץ זה. הריצו את שלב הגאוקוד תחילה.")
+
+        elif not _gc_plan:
+            if st.button("▶ התחל בדיקת דגימה — גאוקוד", type="primary",
+                         use_container_width=True, key="sc_geo_start"):
+                plan = sc.build_sample_plan(df, sc.GEOCODE_STRATA_COLS)
+                st.session_state[_gc_key] = {"plan": plan, "verdicts": {}, "card": None}
+                st.rerun()
+
+        elif not _gc_card:
+            # ── Walk through the sample ─────────────────────────────────
+            _gqueue = []
+            for si, stratum in enumerate(_gc_plan):
+                for ri, idx in enumerate(stratum["sample_indices"]):
+                    vk = f"{si}:{ri}"
+                    if vk not in _gc_verdicts:
+                        _gqueue.append((si, ri, idx, vk))
+
+            total_g = sum(len(s["sample_indices"]) for s in _gc_plan)
+            done_g = len(_gc_verdicts)
+
+            if _gqueue:
+                si, ri, idx, vkey = _gqueue[0]
+                stratum = _gc_plan[si]
+
+                # Curtail on first defect in this stratum
+                _stratum_defects = sum(
+                    1 for k, v in _gc_verdicts.items()
+                    if k.startswith(f"{si}:") and v == "wrong"
+                )
+                if _stratum_defects > 0:
+                    for _, ri2, _, vk2 in _gqueue:
+                        if vk2.startswith(f"{si}:"):
+                            _gc_verdicts[vk2] = "skipped"
+                    st.session_state[_gc_key]["verdicts"] = _gc_verdicts
+                    st.rerun()
+
+                st.progress(done_g / total_g if total_g else 1.0)
+                st.markdown(
+                    f'<div style="text-align:center;font-size:.85rem;margin-bottom:.8rem;">'
+                    f'שורה {done_g + 1} מתוך {total_g} · '
+                    f'שכבה: <strong>{stratum["label"]}</strong> '
+                    f'({stratum["lot_size"]:,} שורות במנה)</div>',
                     unsafe_allow_html=True)
 
-        _qa_seed = st.number_input("זרע אקראיות (0 = כל פעם שונה)", min_value=0,
-                                   max_value=99999, value=42, step=1, key="qa_seed")
-        if st.button("▶ הרץ דגימת QA", type="primary", use_container_width=True):
-            _qa_result = qs.run_sampling_plan(df, seed=int(_qa_seed) or None)
-            _table(_qa_result, search=True)
-            n_reject = int((_qa_result["פסיקה"].str.startswith("❌")).sum())
-            if n_reject == 0:
-                st.success("כל הרמות עברו את דגימת ה-QA")
+                review = sc.row_for_review(df, idx, "geocode")
+
+                col_orig, col_dec = st.columns(2)
+                with col_orig:
+                    st.markdown("**📄 כתובת מקורית:**")
+                    for k, v in review["original"].items():
+                        if v:
+                            st.markdown(f"**{k}:** {v}")
+                with col_dec:
+                    st.markdown("**🤖 תוצאת גאוקוד:**")
+                    for k, v in review["decision"].items():
+                        if v:
+                            st.markdown(f"**{k}:** {v}")
+
+                b1, b2, b3 = st.columns([1, 1, 2])
+                with b1:
+                    if st.button("✅ נכון", type="primary", use_container_width=True,
+                                 key=f"gc_ok_{vkey}"):
+                        _gc_verdicts[vkey] = "correct"
+                        st.session_state[_gc_key]["verdicts"] = _gc_verdicts
+                        st.rerun()
+                with b2:
+                    if st.button("❌ שגוי", use_container_width=True,
+                                 key=f"gc_wrong_{vkey}"):
+                        _gc_verdicts[vkey] = "wrong"
+                        st.session_state[_gc_key]["verdicts"] = _gc_verdicts
+                        st.rerun()
+                with b3:
+                    if st.button("⏭️ דלג (לא בטוח)", use_container_width=True,
+                                 key=f"gc_skip_{vkey}"):
+                        _gc_verdicts[vkey] = "correct"
+                        st.session_state[_gc_key]["verdicts"] = _gc_verdicts
+                        st.rerun()
+
             else:
-                st.warning(f"{n_reject} רמות לא עברו את הדגימה — יש לבדוק")
+                # Build acceptance card
+                strata_results = []
+                for si, stratum in enumerate(_gc_plan):
+                    n_rev = 0
+                    n_def = 0
+                    for ri in range(len(stratum["sample_indices"])):
+                        v = _gc_verdicts.get(f"{si}:{ri}", "correct")
+                        if v == "skipped":
+                            continue
+                        n_rev += 1
+                        if v == "wrong":
+                            n_def += 1
+                    strata_results.append({
+                        "label": stratum["label"],
+                        "lot_size": stratum["lot_size"],
+                        "sample_n": stratum["sample_n"],
+                        "reviewed": n_rev,
+                        "defects": n_def,
+                        "verdict": "pass" if n_def == 0 else "fail",
+                        "sample_tickets": stratum["sample_tickets"],
+                    })
+                card = sc.build_acceptance_card(
+                    "geocode", strata_results,
+                    sc.DEFAULT_P_REJECT, sc.DEFAULT_BETA,
+                    run_id=st.session_state.get("run_id", ""),
+                )
+                st.session_state[_gc_key]["card"] = card
+                st.session_state["acceptance_card_geocode"] = card
+                _save_state()
+                st.rerun()
+
+        else:
+            card = _gc_card
+            if card["passed"]:
+                st.markdown(
+                    f'<div style="background:#d1fae5;border:2px solid #059669;'
+                    f'border-radius:10px;padding:1.2rem;text-align:center;'
+                    f'font-size:1.1rem;margin-bottom:1rem;">'
+                    f'✅ <strong>{card["claim"]}</strong></div>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<div style="background:#fee2e2;border:2px solid #dc2626;'
+                    f'border-radius:10px;padding:1.2rem;text-align:center;'
+                    f'font-size:1.1rem;margin-bottom:1rem;">'
+                    f'❌ <strong>{card["claim"]}</strong></div>',
+                    unsafe_allow_html=True)
+
+            _table(sc.card_to_dataframe(card))
+
+            if st.button("🔄 בצע בדיקה מחדש", use_container_width=True,
+                         key="sc_geo_redo"):
+                st.session_state.pop(_gc_key, None)
+                st.session_state.pop("acceptance_card_geocode", None)
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════
