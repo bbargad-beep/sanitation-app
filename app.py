@@ -2068,7 +2068,7 @@ elif stage == "clean":
                 unsafe_allow_html=True)
     else:
         _sc_key = "_spotcheck_clean"
-        _sc_state = st.session_state.get(_sc_key, {})
+        _sc_state = st.session_state.get(_sc_key) or {}
         _sc_plan = _sc_state.get("plan")
         _sc_verdicts = _sc_state.get("verdicts", {})
         _sc_card = _sc_state.get("card")
@@ -2829,7 +2829,7 @@ elif stage == "output":
             unsafe_allow_html=True)
 
         _gc_key = "_spotcheck_geocode"
-        _gc_state = st.session_state.get(_gc_key, {})
+        _gc_state = st.session_state.get(_gc_key) or {}
         _gc_plan = _gc_state.get("plan")
         _gc_verdicts = _gc_state.get("verdicts", {})
         _gc_card = _gc_state.get("card")
