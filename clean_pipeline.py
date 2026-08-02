@@ -105,24 +105,24 @@ SUBSTANCE_MAP = {
     "אשפתון מלא": "אשפה ביתית",
     "בור גזם": "גזם",
     "גזם עירוני שלא פונה": "גזם",
-    "גראפיטי": "לא רלוונטי",
-    "טופס דיווח על גרימת נזק בשל פינוי אשפה": "לא רלוונטי",
+    "גראפיטי": "בקשה מהעירייה",
+    "טופס דיווח על גרימת נזק בשל פינוי אשפה": "בקשה מהעירייה",
     "טמוני קרקע מלאים": "אשפה ביתית",
-    "כלי אצירה פגומים": "לא רלוונטי",
+    "כלי אצירה פגומים": "בקשה מהעירייה",
     "מגרש מלוכלך": "כללי",
     "מדרכה מלוכלכת": "כללי",
     "מיכל אשפה עילי מלא": "אשפה ביתית",
     "ניקיון מקלטים": "כללי",
-    "סחף אדמה": "לא רלוונטי",
+    "סחף אדמה": "בקשה מהעירייה",
     "ערמת פסולת": "כללי",
     "ערמת קרטונים": "קרטונים",
-    "עשבים במדרכה": "לא רלוונטי",
+    "עשבים במדרכה": "בקשה מהעירייה",
     "פגר בעלי כנף": "עוף",
     "פגר חיה": "חיה",
     "פגר חתול": "חתול",
     "פגר עכבר/קיפוד": "מכרסם",
     "פח אשפה שלא הוחזר": "אשפה ביתית",
-    "פח שנעלם": "לא רלוונטי",
+    "פח שנעלם": "בקשה מהעירייה",
     "פינוי אשפה בבית חדש": "אשפה ביתית",
     "פינוי אשפה חריג": "אשפה ביתית",
     "פינוי פח 3700": "אשפה ביתית",
@@ -132,8 +132,8 @@ SUBSTANCE_MAP = {
     "רחוב מלוכלך": "כללי",
     "ריקון אשפה לפחים אחרים": "אשפה ביתית",
     "שירותים ציבוריים": "כללי",
-    "שקיות איסוף צואת כלבים": "לא רלוונטי",
-    "תקלה בטמוני קרקע": "לא רלוונטי",
+    "שקיות איסוף צואת כלבים": "בקשה מהעירייה",
+    "תקלה בטמוני קרקע": "בקשה מהעירייה",
 }
 
 # --- 3) Asset: original sub-topic  ->  affected asset dimension --------------
@@ -181,11 +181,11 @@ ASSET_MAP = {
 # Ambiguous categories are intentionally set to א.מ.ל ("unknown") because the
 # true responsibility can only be told from the free text (refine manually).
 RESPONSIBILITY_MAP = {
-    "אי פינוי": "כשל עירוני",
-    "תלונה על ביצוע הפינוי": "כשל עירוני",
-    "כלי אצירה מלא": "כשל עירוני",
+    "אי פינוי": "עירייה",
+    "תלונה על ביצוע הפינוי": "עירייה",
+    "כלי אצירה מלא": "עירייה",
     "כלי אצירה פגומים": "א.מ.ל",   # ambiguous -> unknown
-    "תביעת נזק": "כשל עירוני",
+    "תביעת נזק": "עירייה",
     "משטח מלוכלך": "א.מ.ל",        # ambiguous -> unknown
     "פח נעלם": "א.מ.ל",            # ambiguous -> unknown
     "פסולת לא מורשית": "התנהגות אזרח",
@@ -194,14 +194,14 @@ RESPONSIBILITY_MAP = {
     "פגר": "טבעי",
     "סחף אדמה": "טבעי",
     "פלישת צומח": "טבעי",
-    "בקשה מיוחדת לפינוי": "לא רלוונטי",
-    "בקשת ציוד ציבורי": "לא רלוונטי",
+    "בקשה מיוחדת לפינוי": "בקשה מהעירייה",
+    "בקשת ציוד ציבורי": "בקשה מהעירייה",
 }
 
 # Keywords for smart responsibility resolution of א.מ.ל categories.
 # If תיאור contains any keyword in a group, the responsibility is assigned.
 _RESP_KEYWORDS = {
-    "כשל עירוני": [
+    "עירייה": [
         # Collection crew damaged/lost the bin
         "שברו", "שבור", "דרסו", "נשבר", "החזירו", "לא החזירו", "הוחזר",
         "לא הוחזר", "לקחו", "נלקח", "נעלם אחרי פינוי", "נעלם לאחר פינוי",
@@ -599,7 +599,22 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
 # ============================================================================
 
 KNOWN_CATEGORIES_LIST = sorted(RESPONSIBILITY_MAP.keys())
-KNOWN_RESPONSIBILITIES = ["כשל עירוני", "התנהגות אזרח", "טבעי", "לא רלוונטי"]
+KNOWN_RESPONSIBILITIES = ["עירייה", "התנהגות אזרח", "טבעי", "בקשה מהעירייה"]
+
+# Vocabulary used before 2026-08.  Files produced by earlier runs still carry
+# these values; normalise_responsibility() maps them onto the current terms so
+# old and new data can be compared and charted together.
+LEGACY_RESPONSIBILITIES = {
+    "כשל עירוני": "עירייה",
+    "לא רלוונטי": "בקשה מהעירייה",
+}
+
+
+def normalise_responsibility(value):
+    """Map a legacy responsibility label onto the current vocabulary."""
+    if value is None:
+        return value
+    return LEGACY_RESPONSIBILITIES.get(str(value).strip(), value)
 
 # Common Hebrew function words + boilerplate that carry no cause signal.
 # Removed before discovering which *content* words recur in the free text.
@@ -709,11 +724,11 @@ def auto_resolve_from_context(df: pd.DataFrame) -> pd.DataFrame:
     ALL available columns — not just תיאור.
 
     Rules applied (in priority order):
-      1. סטטוס פנייה contains "טופל" + ambiguous category → כשל עירוני
+      1. סטטוס פנייה contains "טופל" + ambiguous category → עירייה
          (municipality acknowledged the issue by handling it)
-      2. מחלקה contains crew/cleaning refs → כשל עירוני
+      2. מחלקה contains crew/cleaning refs → עירייה
       3. כתובת context: beach/park locations with nature-related descriptions → טבעי
-      4. הערת_כתובת or הערת_מיקום mentions specific infrastructure → כשל עירוני
+      4. הערת_כתובת or הערת_מיקום mentions specific infrastructure → עירייה
       5. Re-run keyword matching on תיאור (picks up any newly added keywords)
     """
     df = df.copy()
@@ -744,7 +759,7 @@ def auto_resolve_from_context(df: pd.DataFrame) -> pd.DataFrame:
         # ticket was closed, not who caused it. Only apply to categories where
         # the asset itself is municipal property.
         if "טופל" in status and cat in ("כלי אצירה פגומים", "פח נעלם"):
-            resolved = "כשל עירוני"
+            resolved = "עירייה"
             source = "context_resolve"
 
         # Rule 2 REMOVED: מחלקה = "תברואה" appears on EVERY complaint in this

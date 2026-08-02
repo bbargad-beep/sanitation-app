@@ -166,21 +166,48 @@ import os, tempfile, pickle, hashlib
 
 _STATE_FILE = os.path.join(tempfile.gettempdir(), "herzliya_sanitation_app_state.pkl")
 
+# Bump when the persisted shape changes in a way older files cannot satisfy.
+STATE_SCHEMA_VERSION = 2
+
+# Session keys that must survive a reconnect.  Anything omitted here is
+# silently lost on restore, which previously desynchronised the Q&A undo
+# buffer and the enrichment fingerprint from the DataFrame they describe.
+_PERSIST_KEYS = [
+    "stage", "df", "filename", "stats", "run_id",
+    "_clean_stats", "_context_resolved", "_df_before_qa", "_qa_applied",
+    "enrich_fingerprint",
+]
+
+
+def _derive_geocoded(df) -> bool:
+    """Infer geocode completion from the data itself, not a stored flag."""
+    if df is None or "קו_רוחב" not in df.columns:
+        return False
+    return bool(pd.to_numeric(df["קו_רוחב"], errors="coerce").notna().any())
+
+
+def _derive_enriched(df) -> bool:
+    """Infer enrichment completion from the data itself, not a stored flag."""
+    if df is None:
+        return False
+    return any(c in df.columns for c in ("תלונה_חוזרת", "תלונה_ביום_פינוי"))
+
+
 def _save_state():
-    """Persist all session state to disk."""
+    """Persist session state to disk, stamped with schema version + columns."""
     try:
-        state = {
-            "stage":    st.session_state.get("stage", "upload"),
-            "df":       st.session_state.get("df"),
-            "filename": st.session_state.get("filename", ""),
-            "stats":    st.session_state.get("stats", {}),
-            "geocoded": st.session_state.get("geocoded", False),
-            "enriched": st.session_state.get("enriched", False),
-        }
+        df = st.session_state.get("df")
+        state = {k: st.session_state.get(k) for k in _PERSIST_KEYS}
+        state["stage"] = st.session_state.get("stage", "upload")
+        state["filename"] = st.session_state.get("filename", "")
+        state["stats"] = st.session_state.get("stats", {})
+        state["_schema_version"] = STATE_SCHEMA_VERSION
+        state["_columns"] = list(df.columns) if df is not None else []
         with open(_STATE_FILE, "wb") as f:
             pickle.dump(state, f)
     except Exception:
         pass
+
 
 def _load_state():
     """Load persisted state from disk into session state (only on first load)."""
@@ -192,11 +219,41 @@ def _load_state():
     try:
         with open(_STATE_FILE, "rb") as f:
             state = pickle.load(f)
-        # Only restore if we have real data
-        if state.get("df") is not None and len(state["df"]) > 0:
-            for k, v in state.items():
-                st.session_state.setdefault(k, v)
-            st.session_state["_just_restored"] = True
+    except Exception:
+        st.session_state["_restore_error"] = "קובץ המצב פגום ולא ניתן לשחזור."
+        return
+
+    df = state.get("df")
+    if df is None or len(df) == 0:
+        return
+
+    ver = state.get("_schema_version", 1)
+    if ver != STATE_SCHEMA_VERSION:
+        # Restore anyway — the data is still usable — but say so, because
+        # features that depend on newer columns will be degraded.
+        st.session_state["_restore_stale"] = (
+            f"הקובץ המשוחזר נשמר בגרסה ישנה יותר של המערכת (גרסה {ver}). "
+            "הנתונים נטענו, אך ייתכן שחלק מהמידע על אופן העיבוד חסר."
+        )
+
+    for k, v in state.items():
+        if k.startswith("_schema") or k == "_columns":
+            continue
+        st.session_state.setdefault(k, v)
+
+    # Stage-completion flags are derived, never trusted from the pickle.
+    st.session_state["geocoded"] = _derive_geocoded(df)
+    st.session_state["enriched"] = _derive_enriched(df)
+    st.session_state["_just_restored"] = True
+
+    # Bring pre-2026-08 responsibility labels onto the current vocabulary so
+    # restored files chart and filter alongside newly-processed ones.
+    try:
+        _df = st.session_state.get("df")
+        if _df is not None and "אחריות" in _df.columns:
+            _df["אחריות"] = _df["אחריות"].map(
+                lambda v: cp.LEGACY_RESPONSIBILITIES.get(str(v).strip(), v)
+            )
     except Exception:
         pass
 
@@ -217,8 +274,13 @@ def _init_state():
     ss.setdefault("stats", {})
     ss.setdefault("geocoded", False)
     ss.setdefault("enriched", False)
+    ss.setdefault("run_id", al.new_run_id())
 
 _init_state()
+
+# app.py force-evicts pipeline modules from sys.modules on every rerun, so the
+# audit log's module-level run id must be re-applied from session state here.
+al.set_run(st.session_state["run_id"])
 
 def goto(stage):
     st.session_state.stage = stage
@@ -832,6 +894,50 @@ def _render_stepper_nav(current: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  PROVENANCE + CACHING HELPERS
+# ══════════════════════════════════════════════════════════════════════════
+
+# Columns written by clean_pipeline that record *how* each decision was made.
+# Files produced before these existed cannot be audited — absence of the
+# columns means "unknown", never "nothing was corrected".
+PROVENANCE_COLS = ["סיווג_מקור", "אחריות_מקור", "מסלול_כתובת"]
+
+
+def _provenance_status(df: pd.DataFrame) -> tuple:
+    """
+    Return (level, missing) where level is:
+      "full"    — all provenance columns present
+      "partial" — some present
+      "none"    — none present (legacy file; nothing can be audited)
+    """
+    if df is None:
+        return "none", list(PROVENANCE_COLS)
+    missing = [c for c in PROVENANCE_COLS if c not in df.columns]
+    if not missing:
+        return "full", []
+    if len(missing) == len(PROVENANCE_COLS):
+        return "none", missing
+    return "partial", missing
+
+
+def _provenance_notice(level: str, missing: list) -> str:
+    """Human explanation for a degraded provenance state."""
+    if level == "none":
+        return ("קובץ זה נטען לפני שהמערכת התחילה לתעד את מקור ההחלטות, "
+                "ולכן <strong>לא ניתן להציג מה תוקן אוטומטית</strong>. "
+                "אין משמעות הדבר שלא בוצעו תיקונים — רק שאין דרך לבדוק אותם. "
+                "כדי לקבל יומן מלא, יש להעלות את הקובץ המקורי מחדש ולהריץ את שלב הניקוי.")
+    return ("חלק מנתוני המקור חסרים בקובץ זה (" + ", ".join(missing) + "), "
+            "ולכן היומן להלן חלקי ואינו מכסה את כל התיקונים שבוצעו.")
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _detect_flags_cached(df: pd.DataFrame, dmin: str, dmax: str, stage: str):
+    """Cached wrapper around flags.detect_flags — re-runs only when df changes."""
+    return fl.detect_flags(df, dmin, dmax, stage=stage)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  CAPABILITY PROBE
 #  Several geocoding sources are optional at import time and degrade silently
 #  when their dependency is missing.  Probe them once per session and show the
@@ -954,6 +1060,14 @@ if (st.session_state.get("df") is not None
         unsafe_allow_html=True)
     st.session_state["_just_restored"] = False
 
+_restore_err = st.session_state.pop("_restore_error", None)
+if _restore_err:
+    st.markdown(f'<div class="banner-error">⚠️ {_restore_err}</div>', unsafe_allow_html=True)
+
+_restore_stale = st.session_state.get("_restore_stale")
+if _restore_stale:
+    st.markdown(f'<div class="banner-warn">ℹ️ {_restore_stale}</div>', unsafe_allow_html=True)
+
 _render_stepper_nav(st.session_state.stage)
 stage = st.session_state.stage
 
@@ -992,6 +1106,8 @@ if stage == "upload":
                 ] if c in df_raw.columns] or list(df_raw.columns[:6])
                 _table(df_raw[_preview_cols], max_rows=5)
                 if st.button("▶ התחל עיבוד — נקה נתונים", type="primary", use_container_width=True):
+                    # A new source file is a new run: give it its own audit log.
+                    st.session_state["run_id"] = al.set_run(al.new_run_id())
                     with st.spinner("מנקה ומעבד..."):
                         df_clean = run_clean_in_memory(df_raw)
                         df_clean = auto_fix(df_clean)
@@ -1024,7 +1140,7 @@ elif stage == "clean":
         _ccs["conf_low"]    = int((df["_confidence"] == "low").sum()    if "_confidence" in df.columns else 0)
         st.session_state["_clean_stats"] = _ccs
 
-    flagged = fl.detect_flags(df, DATE_MIN, DATE_MAX, stage="clean")
+    flagged = _detect_flags_cached(df, DATE_MIN, DATE_MAX, "clean")
     n_block = fl.count_blocking(flagged)
     n_warn  = fl.count_warnings(flagged)
 
@@ -1070,8 +1186,12 @@ elif stage == "clean":
             st.rerun()
 
     # ── Count correction types for summary breakdown ─────────────────────────
-    _n_cat_corrections = 0
-    _n_resp_corrections = 0
+    # NB: when a provenance column is absent we must render "—" (unknown),
+    # never 0, which would assert that no corrections were made.
+    _prov_level, _prov_missing = _provenance_status(df)
+
+    _n_cat_corrections = None
+    _n_resp_corrections = None
     if "סיווג_מקור" in df.columns:
         _n_cat_corrections = int((df["סיווג_מקור"] == "map").sum())
     if "אחריות_מקור" in df.columns:
@@ -1082,9 +1202,27 @@ elif stage == "clean":
             (_resp_src_col == "context_resolve").sum()
         )
 
+    _cat_txt  = f"{_n_cat_corrections:,} קטגוריה"  if _n_cat_corrections  is not None else "— קטגוריה"
+    _resp_txt = f"{_n_resp_corrections:,} אחריות" if _n_resp_corrections is not None else "— אחריות"
+    if _prov_level == "none":
+        _breakdown_txt = "פירוט לא זמין לקובץ זה"
+    else:
+        _breakdown_txt = f"{_cat_txt} · {_resp_txt}"
+
     # ── Summary cards (3 cards: auto-processed, awaiting input, structural) ─
     st.markdown('<div id="section-summary"></div>', unsafe_allow_html=True)
     _pct_auto = round(n_auto / len(df) * 100) if len(df) else 0
+    # Without _confidence there is no basis for the auto-processed count, so it
+    # must read as unknown rather than as zero.
+    _conf_known = ("_confidence" in df.columns) or bool(_cs.get("conf_high") or _cs.get("conf_medium"))
+    _auto_big   = f"{n_auto:,}" if _conf_known else "—"
+    _auto_line  = (
+        f'✅ <strong>{_pct_auto}%</strong> מהשורות ({n_auto:,}) עובדו אוטומטית — '
+        f'ניתן לעיין ביומן התיקונים ולתקן.'
+        if _conf_known else
+        'ℹ️ לא ניתן לדעת כמה שורות עובדו אוטומטית בקובץ זה — נתוני רמת הביטחון אינם נשמרו בו. '
+        'העלו את הקובץ המקורי והריצו את שלב הניקוי כדי לקבל נתון זה.'
+    )
     st.markdown(f"""
     <style>
     .conf-row {{display:flex;gap:.9rem;margin-bottom:1.3rem;flex-direction:row-reverse;}}
@@ -1102,9 +1240,9 @@ elif stage == "clean":
     </style>
     <div class="conf-row">
       <div class="conf-card cc-green">
-        <div class="cn">{n_auto:,}</div>
+        <div class="cn">{_auto_big}</div>
         <div class="cl">✅ עובדו אוטומטית</div>
-        <div class="cs">{_n_cat_corrections:,} קטגוריה · {_n_resp_corrections:,} אחריות</div>
+        <div class="cs">{_breakdown_txt}</div>
       </div>
       <div class="conf-card cc-orange">
         <div class="cn">{n_low:,}</div>
@@ -1118,7 +1256,7 @@ elif stage == "clean":
       </div>
     </div>
     <div style="text-align:right;color:#475569;font-size:.84rem;margin-bottom:1rem;">
-      ✅ <strong>{_pct_auto}%</strong> מהשורות ({n_auto:,}) עובדו אוטומטית — ניתן לעיין ביומן התיקונים ולתקן.
+      {_auto_line}
       {f"🙋 <strong>{n_low:,}</strong> שורות ממתינות לקלט שלך." if n_low > 0 else ""}
     </div>
     """, unsafe_allow_html=True)
@@ -1137,8 +1275,13 @@ elif stage == "clean":
         "manual_review": "סימון לבדיקה",
     }
 
+    @st.cache_data(show_spinner=False, max_entries=3)
     def _build_correction_log(df: pd.DataFrame) -> pd.DataFrame:
-        """One row per correction. Includes type, method, and original CRM context."""
+        """One row per correction. Includes type, method, and original CRM context.
+
+        Cached: this is a full Python-level pass over every row, and without
+        caching it re-ran on every widget interaction in the stage.
+        """
         route_labels = {"std": "כתובת", "intersection": "צומת",
                         "range": "טווח", "apt_suffix": "סיומת דירה",
                         "multi": "מרובה", "landmark": "ציון דרך"}
@@ -1234,7 +1377,11 @@ elif stage == "clean":
                 "סוג תיקון", "לפני", "אחרי", "מהות התיקון"]
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
-    _corr_log = _build_correction_log(df)
+    # Only meaningful when the provenance columns exist; otherwise the loop
+    # would return an empty frame and we would render "0 corrections", which
+    # is a false claim rather than a missing one.
+    _corr_log = (_build_correction_log(df) if _prov_level != "none"
+                 else pd.DataFrame())
 
     # Count by correction type
     _corr_n_total = len(_corr_log)
@@ -1245,11 +1392,21 @@ elif stage == "clean":
     _corr_has_addr = _type_counts.get("כתובת", 0)
 
     st.markdown('<div id="section-corrections"></div>', unsafe_allow_html=True)
-    with st.expander(
-        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} כרטיסים, {_corr_n_total:,} תיקונים",
-        expanded=False,
-    ):
-        if _corr_log.empty:
+    _corr_title = (
+        "📋 יומן תיקונים אוטומטיים — לא זמין לקובץ זה"
+        if _prov_level == "none" else
+        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} כרטיסים, {_corr_n_total:,} תיקונים"
+        + ("  ⚠️ חלקי" if _prov_level == "partial" else "")
+    )
+    with st.expander(_corr_title, expanded=False):
+        if _prov_level != "full":
+            st.markdown(
+                f'<div class="banner-warn">ℹ️ {_provenance_notice(_prov_level, _prov_missing)}</div>',
+                unsafe_allow_html=True)
+
+        if _prov_level == "none":
+            pass  # nothing can be shown; the notice above explains why
+        elif _corr_log.empty:
             st.info("לא בוצעו תיקונים אוטומטיים.")
         else:
             _stats_parts = []
@@ -1800,8 +1957,14 @@ elif stage == "clean":
             type="primary",
         )
     with _dl_col2:
-        if st.button("➡️ המשך לגאוקוד", use_container_width=True,
-                     help="לאחר שהורדת ובדקת את הקובץ — לחץ להמשיך"):
+        # Must honour the same blocking-error gate as the CTA at the bottom of
+        # the stage; previously this button skipped it entirely.
+        if n_block > 0:
+            st.button(f"➡️ המשך לגאוקוד ({n_block:,} חוסמות)",
+                      use_container_width=True, disabled=True,
+                      help="יש שגיאות מבניות. תקנו אותן, או השתמשו ב\"עבור הלאה בכל זאת\" בתחתית העמוד.")
+        elif st.button("➡️ המשך לגאוקוד", use_container_width=True,
+                       help="לאחר שהורדת ובדקת את הקובץ — לחץ להמשיך"):
             goto("geocode")
 
     # ── Re-upload corrected file ────────────────────────────────────────────
@@ -1969,7 +2132,7 @@ elif stage == "geocode":
                 st.rerun()
     else:
         df = st.session_state.df
-        flagged = fl.detect_flags(df, DATE_MIN, DATE_MAX, stage="geocode")
+        flagged = _detect_flags_cached(df, DATE_MIN, DATE_MAX, "geocode")
         n_block = fl.count_blocking(flagged)  # ungeocoded real addresses
         geo_ok = int(pd.to_numeric(df["קו_רוחב"].astype(str).str.replace(",", ""),
                                    errors="coerce").notna().sum())

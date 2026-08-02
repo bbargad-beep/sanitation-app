@@ -113,9 +113,7 @@ def test_excel_bytes_contains_audit_sheet(df_enriched, tmp_xlsx, monkeypatch):
     try:
         al.log_correction("42", "קו_רוחב", None, 32.165, "manual_editor", log_path=tmp_log)
 
-        # Monkeypatch audit_log to use our temp log
         import audit_log
-        monkeypatch.setattr(audit_log, "_LOG_FILE", tmp_log)
 
         # Import excel_bytes (can't import app.py directly due to Streamlit)
         # Instead verify the audit_log sheet by building it manually
@@ -144,3 +142,36 @@ def test_empty_log_returns_empty_df():
         assert set(df.columns) == REQUIRED_FIELDS
     finally:
         os.unlink(tmp_path)
+
+
+# ── Run scoping ─────────────────────────────────────────────────────────────
+
+def test_entries_are_scoped_to_their_run(monkeypatch, tmp_path):
+    """Two runs must not see each other's corrections."""
+    monkeypatch.setattr(al, "LOG_DIR", str(tmp_path))
+
+    run_a = al.set_run("run-aaa")
+    al.log_correction("1", "רחוב_ראשי", "", "סוקולוב", "manual_editor")
+    al.log_correction("2", "רחוב_ראשי", "", "ויצמן", "manual_editor")
+
+    run_b = al.set_run("run-bbb")
+    al.log_correction("3", "רחוב_ראשי", "", "בן גוריון", "manual_editor")
+
+    assert len(al.load_log(run_id=run_a)) == 2
+    assert len(al.load_log(run_id=run_b)) == 1
+    assert al.load_log() == al.load_log(run_id=run_b)   # current run is b
+
+    tickets_a = {e["ticket"] for e in al.load_log(run_id=run_a)}
+    assert tickets_a == {"1", "2"}
+
+
+def test_run_id_is_recorded_on_every_entry(monkeypatch, tmp_path):
+    monkeypatch.setattr(al, "LOG_DIR", str(tmp_path))
+    al.set_run("run-xyz")
+    entry = al.log_correction("9", "אחריות", "", "עירייה", "user_qa")
+    assert entry["run_id"] == "run-xyz"
+    assert al.load_log()[0]["run_id"] == "run-xyz"
+
+
+def test_new_run_id_is_unique():
+    assert al.new_run_id() != al.new_run_id()

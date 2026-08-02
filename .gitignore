@@ -2,3 +2,6 @@
 *.xlsx
 __pycache__/
 .streamlit/secrets.toml
+audit.jsonl
+audit_*.jsonl
+.claude/
