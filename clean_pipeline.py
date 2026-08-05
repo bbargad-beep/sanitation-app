@@ -229,21 +229,37 @@ _RESP_KEYWORDS = {
 }
 
 
+def resolve_responsibility_kw(category: str, description: str) -> tuple:
+    """
+    Same as resolve_responsibility, but also returns the keyword that matched.
+
+    The matched keyword is the only evidence a human has for why a keyword-based
+    responsibility decision was made.  Returning just the resulting label (as
+    resolve_responsibility does) makes the decision unexplainable downstream —
+    the correction log could only say 'set to X because of keyword X'.
+
+    Returns (responsibility, matched_keyword).  matched_keyword is "" when the
+    decision came from RESPONSIBILITY_MAP or when nothing matched.
+    """
+    base = RESPONSIBILITY_MAP.get(category, "א.מ.ל")
+    if base != "א.מ.ל":
+        return base, ""
+    if not description or pd.isna(description):
+        return "א.מ.ל", ""
+    text = str(description)
+    for resp, keywords in _RESP_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text:
+                return resp, kw
+    return "א.מ.ל", ""
+
+
 def resolve_responsibility(category: str, description: str) -> str:
     """
     For א.מ.ל categories, attempt to resolve responsibility from תיאור keywords.
     Returns the resolved responsibility or א.מ.ל if unresolvable.
     """
-    base = RESPONSIBILITY_MAP.get(category, "א.מ.ל")
-    if base != "א.מ.ל":
-        return base
-    if not description or pd.isna(description):
-        return "א.מ.ל"
-    text = str(description)
-    for resp, keywords in _RESP_KEYWORDS.items():
-        if any(kw in text for kw in keywords):
-            return resp
-    return "א.מ.ל"
+    return resolve_responsibility_kw(category, description)[0]
 
 # --- 5) Weekday number (Mon=0) -> Hebrew day name ---------------------------
 # Fallback: main topic → analytical category when sub-topic is blank in CRM export
@@ -441,6 +457,8 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
     Provenance columns added:
       סיווג_מקור    — how the category was determined (map / topic_fallback / passthrough)
       אחריות_מקור   — how responsibility was determined (map / keyword:<resp> / unresolved)
+      אחריות_מילה   — the keyword that actually matched, when אחריות_מקור is keyword:*
+                      (empty otherwise); this is the evidence shown to reviewers
       מסלול_כתובת   — which address-parsing branch matched (intersection / range / std /
                       apt_suffix / multi / landmark / empty)
     """
@@ -467,7 +485,7 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
         asset = ASSET_MAP.get(orig_sub, "לא ידוע")
 
         # Responsibility with keyword resolution and provenance
-        resp = resolve_responsibility(new_cat, r.get("תיאור", ""))
+        resp, resp_kw = resolve_responsibility_kw(new_cat, r.get("תיאור", ""))
         base_resp = RESPONSIBILITY_MAP.get(new_cat, "א.מ.ל")
         if base_resp != "א.מ.ל":
             resp_source = "map"
@@ -567,7 +585,8 @@ def clean_dataframe(df_raw: pd.DataFrame) -> tuple:
             "כתובת ואתר/מוסד": r.get("כתובת ואתר/מוסד"), "רחוב": loc["רחוב"],
             "הערת_כתובת": loc["הערת_כתובת"], "מחלקה": r.get("מחלקה"),
             "תת נושא": orig_sub, "מספר_חזרה": None,
-            "סיווג_מקור": cat_source, "אחריות_מקור": resp_source, "מסלול_כתובת": addr_route,
+            "סיווג_מקור": cat_source, "אחריות_מקור": resp_source,
+            "אחריות_מילה": resp_kw, "מסלול_כתובת": addr_route,
             "תוקן_אוטומטית": False,
             "_confidence": overall_conf,
             "_confidence_details": " | ".join(conf_details),
@@ -778,15 +797,20 @@ def auto_resolve_from_context(df: pd.DataFrame) -> pd.DataFrame:
                     resolved = "התנהגות אזרח"
                     source = "context_resolve"
 
+        matched_kw = ""
         if not resolved:
-            new_resp = resolve_responsibility(cat, desc)
+            new_resp, matched_kw = resolve_responsibility_kw(cat, desc)
             if new_resp != "א.מ.ל":
                 resolved = new_resp
                 source = f"keyword:{new_resp}"
+            else:
+                matched_kw = ""
 
         if resolved:
             df.at[idx, "אחריות"] = resolved
             df.at[idx, "אחריות_מקור"] = source
+            if matched_kw and "אחריות_מילה" in df.columns:
+                df.at[idx, "אחריות_מילה"] = matched_kw
 
     # Recompute confidence for rows that were resolved
     _tier = {"low": 0, "medium": 1, "high": 2}

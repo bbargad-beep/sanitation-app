@@ -33,7 +33,7 @@ import importlib
 sys.path.insert(0, ".")
 # Force-evict any stale cached module from a prior Streamlit Cloud deploy
 for _mod in ("clean_pipeline", "geocode_pipeline", "enrich_pipeline",
-             "flags", "heatmap", "audit_log"):
+             "flags", "heatmap", "audit_log", "rules"):
     sys.modules.pop(_mod, None)
 _IMPORT_ERR = None
 try:
@@ -44,6 +44,7 @@ try:
     import heatmap as hm
     import audit_log as al
     import spot_check as sc
+    import rules as R
     MODULES_OK = True
 except Exception as e:
     MODULES_OK = False
@@ -179,6 +180,9 @@ _PERSIST_KEYS = [
     "enrich_fingerprint",
     "_spotcheck_clean", "_spotcheck_geocode",
     "acceptance_card_clean", "acceptance_card_geocode",
+    # Rule-ledger verdicts. Losing these on a reconnect would silently reset the
+    # review-coverage claim to 0% while the data still carries the verdicts.
+    "_rule_decisions", "_rule_undo",
 ]
 
 
@@ -1194,7 +1198,7 @@ elif stage == "clean":
         '<a href="#section-summary" style="text-decoration:none;background:#e0f2fe;border:1px solid #7dd3fc;'
         'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#0369a1;">📊 סיכום</a>'
         '<a href="#section-corrections" style="text-decoration:none;background:#f0fdf4;border:1px solid #86efac;'
-        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#166534;">📋 יומן תיקונים</a>'
+        'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#166534;">📋 ספר הכללים</a>'
         '<a href="#section-qa" style="text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;'
         'padding:.35rem .8rem;border-radius:6px;font-size:.82rem;color:#1e40af;">🙋 שאלות</a>'
         '<a href="#section-download" style="text-decoration:none;background:#f8fafc;border:1px solid #e2e8f0;'
@@ -1230,7 +1234,10 @@ elif stage == "clean":
     _n_cat_corrections = None
     _n_resp_corrections = None
     if "סיווג_מקור" in df.columns:
-        _n_cat_corrections = int((df["סיווג_מקור"] == "map").sum())
+        # topic_fallback is a category the system assigned, not a category it
+        # left alone — excluding it understated this figure by the entire file
+        # on exports where תת נושא is blank.
+        _n_cat_corrections = int(df["סיווג_מקור"].isin(["map", "topic_fallback"]).sum())
     if "אחריות_מקור" in df.columns:
         _resp_src_col = df["אחריות_מקור"].astype(str)
         _n_resp_corrections = int(
@@ -1238,6 +1245,14 @@ elif stage == "clean":
             _resp_src_col.str.startswith("keyword:").sum() +
             (_resp_src_col == "context_resolve").sum()
         )
+
+    # Build the rule ledger up front: the summary cards report review coverage,
+    # which is a property of the ledger, not of the row count.
+    _decisions = st.session_state.setdefault("_rule_decisions", {})
+    _ledger = R.build_ledger(df) if _prov_level != "none" else []
+    _ledger = R.merge_decided(_ledger, _decisions)
+    _cov = R.coverage(_ledger, _decisions)
+    _pareto90 = R.pareto(_ledger, 90)
 
     _cat_txt  = f"{_n_cat_corrections:,} קטגוריה"  if _n_cat_corrections  is not None else "— קטגוריה"
     _resp_txt = f"{_n_resp_corrections:,} אחריות" if _n_resp_corrections is not None else "— אחריות"
@@ -1255,7 +1270,7 @@ elif stage == "clean":
     _auto_big   = f"{n_auto:,}" if _conf_known else "—"
     _auto_line  = (
         f'✅ <strong>{_pct_auto}%</strong> מהשורות ({n_auto:,}) עובדו אוטומטית — '
-        f'ניתן לעיין ביומן התיקונים ולתקן.'
+        f'ספר הכללים למטה מראה בדיוק לפי אילו כללים.'
         if _conf_known else
         'ℹ️ לא ניתן לדעת כמה שורות עובדו אוטומטית בקובץ זה — נתוני רמת הביטחון אינם נשמרו בו. '
         'העלו את הקובץ המקורי והריצו את שלב הניקוי כדי לקבל נתון זה.'
@@ -1274,12 +1289,19 @@ elif stage == "clean":
     .cc-orange .cn {{color:#9a3412;}}
     .cc-gray   {{background:#f1f5f9;border:1px solid #cbd5e1;}}
     .cc-gray .cn   {{color:#334155;}}
+    .cc-blue   {{background:#dbeafe;border:1px solid #93c5fd;}}
+    .cc-blue .cn   {{color:#1e40af;}}
     </style>
     <div class="conf-row">
       <div class="conf-card cc-green">
         <div class="cn">{_auto_big}</div>
         <div class="cl">✅ עובדו אוטומטית</div>
         <div class="cs">{_breakdown_txt}</div>
+      </div>
+      <div class="conf-card cc-blue">
+        <div class="cn">{_cov['pct_reviewed']}%</div>
+        <div class="cl">🔎 מהתיקונים נבדקו על ידך</div>
+        <div class="cs">{_cov['n_reviewed']}/{_cov['n_rules']} כללים · {_cov['unreviewed_rows']:,} שורות לא נבדקו</div>
       </div>
       <div class="conf-card cc-orange">
         <div class="cn">{n_low:,}</div>
@@ -1342,6 +1364,7 @@ elif stage == "clean":
             cat_src    = _g("סיווג_מקור")
             resp       = _g("אחריות")
             resp_src   = _g("אחריות_מקור")
+            resp_kw    = _g("אחריות_מילה")
             raw_addr   = _g("כתובת ואתר/מוסד")
             addr_route = _g("מסלול_כתובת")
             status     = _g("סטטוס פנייה")
@@ -1349,7 +1372,12 @@ elif stage == "clean":
             substance  = _g("חומר")
             asset      = _g("נכס")
 
-            has_cat  = bool(orig_sub and new_cat and orig_sub != new_cat and cat_src == "map")
+            # A category assigned by topic fallback is still a category the
+            # system assigned. Counting only cat_src == "map" reported "0
+            # category corrections" on exports where תת נושא is blank — i.e.
+            # it hid the single largest transformation the pipeline performs.
+            has_cat  = bool(new_cat and cat_src in ("map", "topic_fallback")
+                            and (orig_sub != new_cat or cat_src == "topic_fallback"))
             has_resp = (resp_src in ("map",) and resp not in ("א.מ.ל", "")) or \
                        resp_src.startswith("keyword:") or resp_src == "context_resolve"
             _real_routes = {"std", "intersection", "range", "apt_suffix", "multi", "landmark"}
@@ -1372,12 +1400,17 @@ elif stage == "clean":
             }
 
             if has_cat:
-                _method = _SOURCE_LABELS.get(cat_src, cat_src)
-                _mahut = f'תת-נושא "{orig_sub}" שויך לקטגוריה "{new_cat}" לפי טבלת המיפוי'
+                if cat_src == "topic_fallback":
+                    _mahut = (f'תת-הנושא היה ריק בייצוא, ולכן הקטגוריה "{new_cat}" '
+                              f'נגזרה מהנושא הראשי "{orig_topic}" (כלל חלש ממיפוי ישיר)')
+                    _before = orig_topic or "(תת-נושא ריק)"
+                else:
+                    _mahut = f'תת-נושא "{orig_sub}" שויך לקטגוריה "{new_cat}" לפי טבלת המיפוי'
+                    _before = orig_sub
                 rows.append({
                     **_base,
                     "סוג תיקון":   "קטגוריה",
-                    "לפני":        orig_sub,
+                    "לפני":        _before,
                     "אחרי":        new_cat,
                     "מהות התיקון": _mahut,
                 })
@@ -1385,8 +1418,12 @@ elif stage == "clean":
                 if resp_src == "map":
                     _mahut = f'אחריות נקבעה כ"{resp}" — כל פניות הקטגוריה "{new_cat}" מסווגות כך'
                 elif resp_src.startswith("keyword:"):
-                    _kw = resp_src.split(":", 1)[1]
-                    _mahut = f'אחריות נקבעה כ"{resp}" בגלל מילת המפתח "{_kw}" שנמצאה בתיאור'
+                    # resp_src stores the resulting label, not the matched word;
+                    # the actual trigger lives in אחריות_מילה.
+                    _mahut = (f'אחריות נקבעה כ"{resp}" בגלל המילה "{resp_kw}" שנמצאה בתיאור'
+                              if resp_kw else
+                              f'אחריות נקבעה כ"{resp}" ממילת מפתח בתיאור '
+                              f'(המילה עצמה לא נשמרה בקובץ זה)')
                 elif resp_src == "context_resolve":
                     _mahut = f'אחריות נקבעה כ"{resp}" מהקשר: הפנייה טופלה והקטגוריה מצביעה על כשל בציוד'
                 else:
@@ -1414,134 +1451,293 @@ elif stage == "clean":
                 "סוג תיקון", "לפני", "אחרי", "מהות התיקון"]
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
-    # Only meaningful when the provenance columns exist; otherwise the loop
-    # would return an empty frame and we would render "0 corrections", which
-    # is a false claim rather than a missing one.
-    _corr_log = (_build_correction_log(df) if _prov_level != "none"
-                 else pd.DataFrame())
+    # The flat log is now built only when something actually needs it (the
+    # Excel export, or the opt-in raw view). Building it eagerly cost a full
+    # Python pass over every row on every widget interaction in this stage.
+    def _get_corr_log() -> pd.DataFrame:
+        if _prov_level == "none":
+            return pd.DataFrame()
+        return _build_correction_log(df)
 
-    # Count by correction type
-    _corr_n_total = len(_corr_log)
-    _corr_n_tickets = _corr_log["מס' פניה"].nunique() if not _corr_log.empty else 0
-    _type_counts = _corr_log["סוג תיקון"].value_counts().to_dict() if not _corr_log.empty else {}
-    _corr_has_cat  = _type_counts.get("קטגוריה", 0)
-    _corr_has_resp = _type_counts.get("אחריות", 0)
-    _corr_has_addr = _type_counts.get("כתובת", 0)
+    # ════════════════════════════════════════════════════════
+    #  RULE LEDGER — review ~50 rules instead of ~48,000 rows
+    # ════════════════════════════════════════════════════════
+    # Every automatic correction is produced by one of a small closed set of
+    # rules. Grouping by rule turns an unreviewable grid into a finite list,
+    # and lets a verdict apply to all the rows a rule touched at once.
 
     st.markdown('<div id="section-corrections"></div>', unsafe_allow_html=True)
-    _corr_title = (
-        "📋 יומן תיקונים אוטומטיים — לא זמין לקובץ זה"
-        if _prov_level == "none" else
-        f"📋 יומן תיקונים אוטומטיים — {_corr_n_tickets:,} כרטיסים, {_corr_n_total:,} תיקונים"
-        + ("  ⚠️ חלקי" if _prov_level == "partial" else "")
-    )
-    with st.expander(_corr_title, expanded=False):
+
+    if _prov_level == "none":
+        st.markdown(
+            f'<div class="banner-warn">ℹ️ {_provenance_notice(_prov_level, _prov_missing)}</div>',
+            unsafe_allow_html=True)
+    elif not _ledger:
+        st.info("לא בוצעו תיקונים אוטומטיים.")
+    else:
+        st.markdown("#### 📋 ספר הכללים — מה המערכת עשתה, ולמה")
+
         if _prov_level != "full":
             st.markdown(
                 f'<div class="banner-warn">ℹ️ {_provenance_notice(_prov_level, _prov_missing)}</div>',
                 unsafe_allow_html=True)
 
-        if _prov_level == "none":
-            pass  # nothing can be shown; the notice above explains why
-        elif _corr_log.empty:
-            st.info("לא בוצעו תיקונים אוטומטיים.")
-        else:
-            _stats_parts = []
-            if _corr_has_cat:  _stats_parts.append(f"{_corr_has_cat:,} קטגוריה")
-            if _corr_has_resp: _stats_parts.append(f"{_corr_has_resp:,} אחריות")
-            if _corr_has_addr: _stats_parts.append(f"{_corr_has_addr:,} כתובת")
-            st.markdown(
-                f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
-                f'padding:.6rem 1rem;font-size:.85rem;direction:rtl;margin-bottom:.8rem;">'
-                f'סה"כ {_corr_n_tickets:,} כרטיסים · {" · ".join(_stats_parts)}'
-                f'</div>', unsafe_allow_html=True,
+        # ── Coverage meter — the number that replaces "48,000 corrections" ──
+        _pct = _cov["pct_reviewed"]
+        _seg_app = round(_cov["approved_rows"] / _cov["total_rows"] * 100, 1) if _cov["total_rows"] else 0
+        _seg_edt = round(_cov["edited_rows"]   / _cov["total_rows"] * 100, 1) if _cov["total_rows"] else 0
+        _seg_rej = round(_cov["rejected_rows"] / _cov["total_rows"] * 100, 1) if _cov["total_rows"] else 0
+        _seg_non = max(0.0, 100 - _seg_app - _seg_edt - _seg_rej)
+        st.markdown(f"""
+        <style>
+        .cov-bar {{display:flex;flex-direction:row-reverse;height:26px;border-radius:6px;
+                   overflow:hidden;border:1px solid #cbd5e1;margin:.35rem 0 .5rem;}}
+        .cov-bar div {{font-size:.7rem;line-height:26px;text-align:center;color:#fff;}}
+        </style>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+                    padding:.9rem 1.1rem;direction:rtl;margin-bottom:1rem;">
+          <div style="font-size:1.02rem;font-weight:600;color:#0f172a;">
+            {_cov['total_rows']:,} תיקונים אוטומטיים נוצרו על ידי
+            <span style="color:#2563a8;">{_cov['n_rules']} כללים בלבד</span>
+          </div>
+          <div class="cov-bar">
+            <div style="width:{_seg_app}%;background:#059669;">{f'{_seg_app:.0f}%' if _seg_app >= 7 else ''}</div>
+            <div style="width:{_seg_edt}%;background:#7c3aed;">{f'{_seg_edt:.0f}%' if _seg_edt >= 7 else ''}</div>
+            <div style="width:{_seg_rej}%;background:#dc2626;">{f'{_seg_rej:.0f}%' if _seg_rej >= 7 else ''}</div>
+            <div style="width:{_seg_non}%;background:#e2e8f0;color:#475569;">
+              {f'{_seg_non:.0f}% לא נבדק' if _seg_non >= 14 else ''}</div>
+          </div>
+          <div style="font-size:.84rem;color:#475569;">
+            בדקת <strong>{_cov['n_reviewed']}</strong> מתוך {_cov['n_rules']} כללים —
+            <strong>{_pct}%</strong> מהתיקונים ({_cov['reviewed_rows']:,} שורות).
+            נותרו <strong>{_cov['n_unreviewed']}</strong> כללים
+            ({_cov['unreviewed_rows']:,} שורות) שאיש לא בדק.
+          </div>
+          <div style="font-size:.8rem;color:#64748b;margin-top:.3rem;">
+            💡 {_pareto90} הכללים הגדולים ביותר מכסים 90% מהתיקונים —
+            בדיקתם מכסה כמעט הכל בזמן קצר.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Filter + bulk approve ───────────────────────────────────────────
+        _f1, _f2 = st.columns([3, 2])
+        with _f1:
+            _filter = st.radio(
+                "הצג", ["הכל", "לא נבדקו", "אושרו", "נדחו/שונו", "החלטות שלי"],
+                horizontal=True, key="_rule_filter", label_visibility="collapsed",
             )
+        with _f2:
+            if _cov["n_unreviewed"] > 0:
+                with st.popover(f"✅ אשר את כל {_cov['n_unreviewed']} הנותרים",
+                                use_container_width=True):
+                    st.markdown(
+                        "פעולה זו מסמנת את כל הכללים שלא נבדקו כמאושרים בבת אחת. "
+                        "**היא הופכת את מדד הכיסוי לחסר משמעות** — הוא יראה 100% "
+                        "בלי שאיש באמת בדק. השתמש רק אם עברת על הכללים בדרך אחרת."
+                    )
+                    if st.button("אני מאשר — סמן הכל כמאושר", key="_bulk_appr"):
+                        for _r in _ledger:
+                            if _r["user_made"] or _decisions.get(_r["rule_id"]):
+                                continue
+                            df, _n = R.apply_verdict(df, _r, R.VERDICT_APPROVED)
+                            _decisions[_r["rule_id"]] = {
+                                "verdict": R.VERDICT_APPROVED, "rows": _n,
+                                "bulk": True, "rule": _r}
+                        st.session_state.df = df
+                        al.log_correction("batch", "_rule_bulk_approve", "",
+                                          f"{_cov['n_unreviewed']} rules", "rule_review")
+                        _save_state()
+                        st.rerun()
 
-            # AG Grid has per-column filters so the multiselect is redundant when AG Grid is available
-            _filtered_log = _corr_log
+        def _visible(r):
+            d = _decisions.get(r["rule_id"])
+            if _filter == "לא נבדקו":   return not r["user_made"] and not d
+            if _filter == "אושרו":      return d and d["verdict"] == R.VERDICT_APPROVED
+            if _filter == "נדחו/שונו":  return d and d["verdict"] in (R.VERDICT_REJECTED, R.VERDICT_EDITED)
+            if _filter == "החלטות שלי": return r["user_made"]
+            return True
 
-            if _AGGRID_OK and not _filtered_log.empty:
-                _rtl_cols = list(reversed(_filtered_log.columns.tolist()))
-                _rtl_df = _filtered_log[_rtl_cols]
-                _gb = GridOptionsBuilder.from_dataframe(_rtl_df)
-                _gb.configure_default_column(
-                    filterable=True, sortable=True, resizable=True,
-                    wrapText=False, autoHeight=False, minWidth=80,
-                )
-                _gb.configure_column("מס' פניה", pinned="right", width=90, suppressSizeToFit=True)
-                _gb.configure_column("סוג תיקון", width=100, suppressSizeToFit=True)
-                _gb.configure_column("מהות התיקון", width=320)
-                _gb.configure_column("לפני", width=130, suppressSizeToFit=True)
-                _gb.configure_column("אחרי", width=130, suppressSizeToFit=True)
-                _gb.configure_column("תיאור", width=200)
-                _gb.configure_grid_options(
-                    enableRtl=True,
-                    domLayout="normal",
-                    rowHeight=32,
-                    headerHeight=36,
-                    suppressColumnVirtualisation=False,
-                    defaultColDef={"floatingFilter": True},
-                )
-                _gb.configure_pagination(enabled=False)
-                _gb.configure_selection("single")
-                _grid_resp = AgGrid(
-                    _rtl_df,
-                    gridOptions=_gb.build(),
-                    height=560,
-                    update_mode=GridUpdateMode.NO_UPDATE,
-                    allow_unsafe_jscode=False,
-                    key="_corr_aggrid",
-                )
-            else:
-                _grid_resp = None
-                _table(_filtered_log, search=True, max_rows=2000, height=600)
+        _shown = [r for r in _ledger if _visible(r)]
 
-            # Export correction log as Excel
-            _corr_buf = io.BytesIO()
-            _filtered_log.to_excel(_corr_buf, index=False, engine="xlsxwriter")
-            st.download_button(
-                "📥 הורד יומן תיקונים כ-Excel",
-                _corr_buf.getvalue(),
-                file_name="יומן_תיקונים.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="_dl_corr_log",
-            )
-
-            # Override mechanism — select a row in the grid OR type a ticket ID
-            st.markdown("---")
-            _selected_ticket = ""
-            if _AGGRID_OK and _grid_resp is not None:
-                _sel_rows = _grid_resp.get("selected_rows", None)
-                if _sel_rows is not None and len(_sel_rows) > 0:
-                    _sel_row = _sel_rows[0] if isinstance(_sel_rows, list) else _sel_rows.iloc[0]
-                    _selected_ticket = str(_sel_row.get("מס' פניה", ""))
-
-            if _selected_ticket:
+        # ── Pagination — keeps the widget count per rerun bounded ───────────
+        _PER_PAGE = 8
+        _n_pages = max(1, (len(_shown) + _PER_PAGE - 1) // _PER_PAGE)
+        _page = st.session_state.get("_rule_page", 1)
+        _page = min(max(1, _page), _n_pages)
+        if _n_pages > 1:
+            _pc1, _pc2, _pc3 = st.columns([1, 2, 1])
+            with _pc3:
+                if st.button("→ הקודם", disabled=_page <= 1, use_container_width=True,
+                             key="_rp_prev"):
+                    st.session_state["_rule_page"] = _page - 1
+                    st.rerun()
+            with _pc2:
                 st.markdown(
-                    f'<div style="background:#dbeafe;border:1px solid #93c5fd;border-radius:8px;'
-                    f'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
-                    f'✏️ <strong>נבחר כרטיס {_selected_ticket}</strong> — '
-                    f'בחר עמודה לתיקון והזן ערך חדש:</div>',
+                    f'<div style="text-align:center;font-size:.85rem;padding-top:.4rem;">'
+                    f'עמוד {_page} מתוך {_n_pages} · {len(_shown)} כללים</div>',
+                    unsafe_allow_html=True)
+            with _pc1:
+                if st.button("הבא ←", disabled=_page >= _n_pages, use_container_width=True,
+                             key="_rp_next"):
+                    st.session_state["_rule_page"] = _page + 1
+                    st.rerun()
+        _page_rules = _shown[(_page - 1) * _PER_PAGE: _page * _PER_PAGE]
+
+        if not _page_rules:
+            st.info("אין כללים בקטגוריה זו.")
+
+        _RESP_CHOICES = list(cp.KNOWN_RESPONSIBILITIES)
+        _CAT_CHOICES  = list(cp.KNOWN_CATEGORIES_LIST)
+
+        for _r in _page_rules:
+            _rid = _r["rule_id"]
+            _d = _decisions.get(_rid)
+            _pct_of = round(_r["n_rows"] / _cov["total_rows"] * 100, 1) if _cov["total_rows"] else 0
+            _badge = ""
+            if _d:
+                _bg = {"approved": "#d1fae5", "rejected": "#fee2e2", "edited": "#ede9fe"}[_d["verdict"]]
+                _fg = {"approved": "#065f46", "rejected": "#991b1b", "edited": "#5b21b6"}[_d["verdict"]]
+                _badge = (f'<span style="background:{_bg};color:{_fg};border-radius:20px;'
+                          f'padding:.15rem .7rem;font-size:.78rem;font-weight:600;">'
+                          f'{R.VERDICT_LABELS[_d["verdict"]]}</span>')
+
+            with st.container(border=True):
+                st.markdown(
+                    f'<div style="direction:rtl;display:flex;flex-direction:row-reverse;'
+                    f'align-items:center;gap:.7rem;flex-wrap:wrap;">'
+                    f'<span style="font-size:1.25rem;font-weight:700;color:{_r["colour"]};">'
+                    f'{_r["n_rows"]:,}</span>'
+                    f'<span style="font-size:.78rem;color:#64748b;">שורות · {_pct_of}% מהתיקונים</span>'
+                    f'<span style="background:#f1f5f9;border-radius:20px;padding:.15rem .7rem;'
+                    f'font-size:.75rem;color:#334155;">{_r["kind_label"]}</span>'
+                    f'{_badge}</div>'
+                    f'<div style="direction:rtl;font-size:1rem;margin:.45rem 0 .2rem;">'
+                    f'<span style="color:#64748b;">{_r["before"]}</span>'
+                    f'<span style="color:#94a3b8;margin:0 .5rem;">←</span>'
+                    f'<strong style="color:#0f172a;">{_r["after"]}</strong></div>'
+                    f'<div style="direction:rtl;font-size:.84rem;color:#475569;">'
+                    f'{R.explain(_r)}</div>',
                     unsafe_allow_html=True,
                 )
-            else:
-                st.markdown(
-                    '<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;'
-                    'padding:.6rem 1rem;font-size:.84rem;direction:rtl;margin-bottom:.6rem;">'
-                    '✏️ <strong>מצאת שגיאה?</strong> לחץ על שורה בטבלה, או הקלד מספר פניה:</div>',
-                    unsafe_allow_html=True,
-                )
 
+                # ── Evidence: real rows, with the trigger word highlighted ──
+                if _r["example_idx"]:
+                    _ex_html = []
+                    for _ix in _r["example_idx"]:
+                        _row = df.loc[_ix]
+                        _tk = str(_row.get("מס' פניה", ""))
+                        _desc = str(_row.get("תיאור", "") or "")[:160]
+                        _raw = str(_row.get("כתובת ואתר/מוסד", "") or "")[:60]
+                        if _r["kind"] == "resp_keyword" and _r["before"] not in ("", "(ריק)"):
+                            _desc = R.highlight(_desc, _r["before"])
+                        _left = _raw if _r["kind"] == "addr_route" else _desc
+                        _res = (f'{_row.get("רחוב_ראשי", "")} {_row.get("מספר_בית", "")}'
+                                if _r["kind"] == "addr_route"
+                                else _row.get(_r["field"], ""))
+                        _ex_html.append(
+                            f'<div style="border-top:1px solid #f1f5f9;padding:.3rem 0;">'
+                            f'<span style="color:#94a3b8;font-size:.72rem;">#{_tk}</span> '
+                            f'<span style="font-size:.8rem;">{_left or "—"}</span>'
+                            f'<span style="color:#94a3b8;">  →  </span>'
+                            f'<strong style="font-size:.8rem;">{_res}</strong></div>'
+                        )
+                    st.markdown(
+                        '<div style="direction:rtl;background:#fafafa;border-radius:6px;'
+                        'padding:.2rem .7rem;margin:.5rem 0;">'
+                        '<div style="font-size:.73rem;color:#64748b;padding-top:.3rem;">'
+                        'דוגמאות אמיתיות מהנתונים:</div>'
+                        + "".join(_ex_html) + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                if _r["user_made"]:
+                    st.caption("החלטה שלך — לא דורשת אישור.")
+                elif _r.get("withdrawn"):
+                    st.caption(
+                        "התיקונים של הכלל הזה בוטלו — השורות הוחזרו לבירור ידני. "
+                        "הכלל נשאר כאן כתיעוד של ההחלטה שלך."
+                    )
+                else:
+                    _b1, _b2, _b3, _b4 = st.columns([1, 1, 1, 1.3])
+                    with _b1:
+                        if st.button("✅ מאשר", key=f"ra_{_rid}", use_container_width=True,
+                                     type="primary" if not _d else "secondary"):
+                            st.session_state["_rule_undo"] = df.copy()
+                            df, _n = R.apply_verdict(df, _r, R.VERDICT_APPROVED)
+                            _decisions[_rid] = {"verdict": R.VERDICT_APPROVED,
+                                                "rows": _n, "rule": _r}
+                            st.session_state.df = df
+                            al.log_correction("batch", f"rule:{_rid}", "", "approved", "rule_review")
+                            _save_state()
+                            st.rerun()
+                    with _b2:
+                        if st.button("❌ דוחה", key=f"rr_{_rid}", use_container_width=True):
+                            st.session_state["_rule_undo"] = df.copy()
+                            df, _n = R.apply_verdict(df, _r, R.VERDICT_REJECTED)
+                            _decisions[_rid] = {"verdict": R.VERDICT_REJECTED,
+                                                "rows": _n, "rule": _r}
+                            st.session_state.df = df
+                            al.log_correction("batch", f"rule:{_rid}", "", "rejected", "rule_review")
+                            _save_state()
+                            st.rerun()
+                    with _b3:
+                        _can_edit = _r["kind"] != "addr_route"
+                        with st.popover("✎ שנה", use_container_width=True,
+                                        disabled=not _can_edit):
+                            _choices = (_RESP_CHOICES if _r["kind"].startswith("resp")
+                                        else _CAT_CHOICES)
+                            _nv = st.selectbox(
+                                f'ערך חדש לכל {_r["n_rows"]:,} השורות',
+                                _choices,
+                                index=_choices.index(_r["after"]) if _r["after"] in _choices else 0,
+                                key=f"rv_{_rid}")
+                            if st.button("החל על כל השורות", key=f"re_{_rid}"):
+                                st.session_state["_rule_undo"] = df.copy()
+                                df, _n = R.apply_verdict(df, _r, R.VERDICT_EDITED, _nv)
+                                _decisions[_rid] = {"verdict": R.VERDICT_EDITED,
+                                                    "rows": _n, "new_value": _nv,
+                                                    "rule": _r}
+                                st.session_state.df = df
+                                al.log_correction("batch", f"rule:{_rid}", _r["after"],
+                                                  _nv, "rule_review")
+                                _save_state()
+                                st.rerun()
+                    with _b4:
+                        _open = st.toggle(f"הצג {_r['n_rows']:,} שורות", key=f"rs_{_rid}")
+
+                    if _open:
+                        _m = R.rule_mask(df, _r)
+                        _cols = [c for c in ["מס' פניה", "תאריך", "נושא", "תת נושא",
+                                             "תיאור", "כתובת ואתר/מוסד", "רחוב_ראשי",
+                                             "מספר_בית", "תת_נושא_חדש", "אחריות"]
+                                 if c in df.columns]
+                        _table(df.loc[_m, _cols], search=True, max_rows=500, height=300)
+                        if _m.sum() > 500:
+                            st.caption(f"מוצגות 500 מתוך {int(_m.sum()):,} שורות. "
+                                       f"להורדת כולן — השתמש בקובץ ה-Excel למטה.")
+
+        # ── Undo last rule verdict ──────────────────────────────────────────
+        if st.session_state.get("_rule_undo") is not None:
+            if st.button("↩️ בטל את החלטת הכלל האחרונה", key="_rule_undo_btn"):
+                st.session_state.df = st.session_state.pop("_rule_undo")
+                _last = list(_decisions)[-1] if _decisions else None
+                if _last:
+                    _decisions.pop(_last, None)
+                _save_state()
+                st.rerun()
+
+        # ── Per-ticket override (unchanged capability, now secondary) ────────
+        with st.expander("✏️ תיקון כרטיס בודד", expanded=False):
+            st.caption("לתיקון נקודתי של פנייה אחת. לתיקון שיטתי — עדיף לדחות או "
+                       "לשנות את הכלל עצמו למעלה, פעולה אחת במקום אלפי תיקונים.")
             _ov_c1, _ov_c2, _ov_c3 = st.columns([1, 1, 2])
             with _ov_c1:
-                _ov_ticket = st.text_input(
-                    "מס' פניה לתיקון", key="_ov_ticket",
-                    value=_selected_ticket,
-                    placeholder="לדוגמה: 2178241",
-                )
+                _ov_ticket = st.text_input("מס' פניה לתיקון", key="_ov_ticket",
+                                           placeholder="לדוגמה: 2178241")
             with _ov_c2:
-                _ov_col = st.selectbox("עמודה", ["תת_נושא_חדש", "אחריות", "רחוב_ראשי", "מספר_בית"],
-                                       key="_ov_col")
+                _ov_col = st.selectbox("עמודה", ["תת_נושא_חדש", "אחריות",
+                                                 "רחוב_ראשי", "מספר_בית"], key="_ov_col")
             with _ov_c3:
                 _ov_val = st.text_input("ערך חדש", key="_ov_val")
 
@@ -1576,6 +1772,32 @@ elif stage == "clean":
                             st.session_state.df = df
                             _save_state()
                             st.rerun()
+
+        # ── Raw flat log, on demand only ────────────────────────────────────
+        with st.expander("🗂️ תצוגת כל התיקונים כטבלה שטוחה (איטי)", expanded=False):
+            st.caption("הטבלה השטוחה נבנית רק לפי בקשה — בניית עשרות אלפי שורות "
+                       "בכל לחיצה האטה את השלב כולו.")
+            if st.button("בנה טבלה שטוחה", key="_build_flat"):
+                st.session_state["_flat_log"] = _get_corr_log()
+            _flat = st.session_state.get("_flat_log")
+            if _flat is not None and not _flat.empty:
+                if _AGGRID_OK:
+                    _rtl_df = _flat[list(reversed(_flat.columns.tolist()))]
+                    _gb = GridOptionsBuilder.from_dataframe(_rtl_df)
+                    _gb.configure_default_column(filterable=True, sortable=True,
+                                                 resizable=True, minWidth=80)
+                    _gb.configure_column("מס' פניה", pinned="right", width=90)
+                    _gb.configure_column("מהות התיקון", width=320)
+                    _gb.configure_grid_options(enableRtl=True, rowHeight=32, headerHeight=36,
+                                               defaultColDef={"floatingFilter": True})
+                    # Paginated: shipping 48k rows to the browser on every rerun
+                    # was multiple MB of payload per interaction.
+                    _gb.configure_pagination(enabled=True, paginationPageSize=100)
+                    AgGrid(_rtl_df, gridOptions=_gb.build(), height=520,
+                           update_mode=GridUpdateMode.NO_UPDATE,
+                           allow_unsafe_jscode=False, key="_corr_aggrid")
+                else:
+                    _table(_flat, search=True, max_rows=2000, height=520)
 
     # ════════════════════════════════════════════════════════
     #  Q&A — resolve uncertain rows before export
@@ -1943,7 +2165,35 @@ elif stage == "clean":
                 ws3.set_column(0, 0, 40); ws3.set_column(5, len(_bl_rows.columns), 18)
                 ws3.freeze_panes(1, 0)
 
-            # Sheet 5 — summary
+            # Sheet 5 — rule ledger with the reviewer's verdicts.  Without this
+            # the recipient of the workbook has no way to tell which rules a
+            # human actually looked at.
+            if _ledger:
+                _led_rows = []
+                for _lr in _ledger:
+                    _ld = _decisions.get(_lr["rule_id"])
+                    _led_rows.append({
+                        "כלל":           _lr["kind_label"],
+                        "לפני":          _lr["before"],
+                        "אחרי":          _lr["after"],
+                        "שורות":         _lr["n_rows"],
+                        "% מהתיקונים":   (round(_lr["n_rows"] / _cov["total_rows"] * 100, 1)
+                                          if _cov["total_rows"] else 0),
+                        "פסיקת בודק":    (R.VERDICT_LABELS[_ld["verdict"]] if _ld
+                                          else ("—" if _lr["user_made"] else "לא נבדק")),
+                        "ערך שנקבע":     (_ld or {}).get("new_value", ""),
+                        "הסבר":          R.explain(_lr),
+                        "מזהה כלל":      _lr["rule_id"],
+                    })
+                _led_df = pd.DataFrame(_led_rows)
+                _led_df.to_excel(writer, index=False, sheet_name="ספר כללים")
+                ws_led = writer.sheets["ספר כללים"]
+                for j, col in enumerate(_led_df.columns):
+                    ws_led.write(0, j, col, fmt_hdr)
+                ws_led.set_column(0, 2, 26); ws_led.set_column(3, 6, 14)
+                ws_led.set_column(7, 7, 60); ws_led.freeze_panes(1, 0)
+
+            # Sheet 6 — summary
             _low_cnt  = sum(_low_mask)
             _med_cnt  = sum(c == "medium" for c in conf_col)
             _hi_cnt   = sum(c == "high"   for c in conf_col)
@@ -1955,6 +2205,9 @@ elif stage == "clean":
                 ("שגיאות מבניות",            n_block),
                 ("אזהרות מבניות",            n_warn),
                 ("תיקונים אוטומטיים",       len(corr_log)),
+                ("כללים שהפעילו אותם",      _cov["n_rules"]),
+                ("כללים שנבדקו על ידי אדם",  _cov["n_reviewed"]),
+                ("% מהתיקונים שנבדקו",      _cov["pct_reviewed"]),
             ], columns=["מדד", "ערך"]).to_excel(writer, index=False, sheet_name="סיכום")
             ws4 = writer.sheets["סיכום"]
             ws4.set_column("A:A", 30); ws4.set_column("B:B", 14)
@@ -1979,24 +2232,44 @@ elif stage == "clean":
     st.markdown(
         f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
         f'padding:.8rem 1.1rem;font-size:.88rem;direction:rtl;margin-bottom:.8rem;">'
-        f'הקובץ כולל 5 גיליונות:<br>'
+        f'הקובץ כולל 6 גיליונות:<br>'
         f'• <strong>כל הנתונים</strong> — כל {len(df):,} שורות, צבועות לפי רמת ביטחון<br>'
         f'• <strong>תיקונים אוטומטיים</strong> — כל תיקון שבוצע: מה שונה, לפני/אחרי, ובאיזו שיטה<br>'
         f'• <strong>לבירור ידני</strong> — {n_low:,} שורות שהמערכת לא הצליחה לסווג<br>'
         f'• <strong>דורשות תיקון</strong> — שגיאות מבניות שחוסמות המשך<br>'
+        f'• <strong>ספר כללים</strong> — {_cov["n_rules"]} הכללים שהפיקו את התיקונים, '
+        f'ומה פסקת על כל אחד<br>'
         f'• <strong>סיכום</strong> — סטטיסטיקה כללית</div>',
         unsafe_allow_html=True,
     )
+    # The workbook is built on demand, not as a download_button argument.
+    # Streamlit evaluates those arguments on *every* rerun, so the old form
+    # rebuilt a 17k-row formatted sheet plus a ~48k-row correction sheet each
+    # time any widget in this stage changed — tens of seconds of dead time per
+    # click. A fingerprint invalidates the cached bytes when the data moves on.
+    _xl_fp = f"{len(df)}|{n_block}|{n_low}|{len(_decisions)}|{st.session_state.filename}"
+    if st.session_state.get("_review_xlsx_fp") != _xl_fp:
+        st.session_state.pop("_review_xlsx", None)
+
     _dl_col1, _dl_col2 = st.columns([3, 1])
     with _dl_col1:
-        st.download_button(
-            label=f"📥 הורד Excel לבדיקה — {len(df):,} שורות ({n_low:,} לבירור ידני)",
-            data=_review_excel(df, flagged, _corr_log),
-            file_name=f"{base}_לבדיקה.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary",
-        )
+        if st.session_state.get("_review_xlsx") is None:
+            if st.button(f"🛠️ הכן קובץ Excel לבדיקה — {len(df):,} שורות",
+                         use_container_width=True, type="primary"):
+                with st.spinner("בונה את הקובץ (כמה שניות)..."):
+                    st.session_state["_review_xlsx"] = _review_excel(
+                        df, flagged, _get_corr_log())
+                    st.session_state["_review_xlsx_fp"] = _xl_fp
+                st.rerun()
+        else:
+            st.download_button(
+                label=f"📥 הורד Excel לבדיקה — {len(df):,} שורות ({n_low:,} לבירור ידני)",
+                data=st.session_state["_review_xlsx"],
+                file_name=f"{base}_לבדיקה.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
     with _dl_col2:
         # Must honour the same blocking-error gate as the CTA at the bottom of
         # the stage; previously this button skipped it entirely.
@@ -2075,21 +2348,35 @@ elif stage == "clean":
 
         _sc_title = "🔍 בדיקת דגימה — ודא שהמערכת סיווגה נכון"
         if _sc_card:
-            _sc_title += " ✅" if _sc_card["passed"] else " ❌"
+            _sc_title += (" ⚠️" if _sc_card.get("incomplete")
+                          else (" ✅" if _sc_card["passed"] else " ❌"))
         with st.expander(_sc_title, expanded=not bool(_sc_card)):
+            # Quote the real workload from the plan. The fixed "about 50 rows"
+            # copy understated it by roughly 5× on a real export, which is why
+            # nobody reached the end of the check.
+            if _sc_plan:
+                _sc_total = sum(len(s["sample_indices"]) for s in _sc_plan)
+                _sc_effort = f"<strong>{_sc_total} שורות</strong> ב-{len(_sc_plan)} שכבות"
+            else:
+                _pv = sc.build_sample_plan(df, sc.CLEAN_STRATA_COLS)
+                _sc_total = sum(len(s["sample_indices"]) for s in _pv)
+                _sc_effort = f"<strong>{_sc_total} שורות</strong> ב-{len(_pv)} שכבות"
             st.markdown(
-                '<div class="step-card"><h4>מה זה?</h4>'
-                '<p>המערכת בוחרת מדגם אקראי מתוך השורות שעובדו אוטומטית, '
-                'מחולק לפי שיטת ההחלטה (סיווג, אחריות). '
-                'תצטרך לבדוק כ-<strong>50 שורות</strong> — '
-                'לכל שורה תראה את הטקסט המקורי מול ההחלטה של המערכת, '
-                'ותלחץ "נכון" או "שגוי".</p>'
-                '<p>אם 0 שגיאות נמצאו, תקבל <strong>אישור סטטיסטי</strong> '
-                'ששיעור השגיאה בכל הנתונים נמוך מ-5% (ברמת ביטחון 90%).</p></div>',
+                f'<div class="step-card"><h4>מה זה?</h4>'
+                f'<p>המערכת בוחרת מדגם אקראי מתוך השורות שעובדו אוטומטית, '
+                f'מחולק לפי שיטת ההחלטה (סיווג, אחריות). '
+                f'בקובץ הזה תצטרך לבדוק {_sc_effort} — '
+                f'לכל שורה תראה את הטקסט המקורי מול ההחלטה של המערכת, '
+                f'ותלחץ "נכון" או "שגוי". אפשר לעצור ולחזור בהמשך.</p>'
+                f'<p>אם לא נמצאו שגיאות: אילו שיעור השגיאה האמיתי היה 5% או יותר, '
+                f'היה סיכוי של 90% שהבדיקה הייתה מגלה זאת.</p>'
+                f'<p style="color:#64748b;font-size:.82rem;">בדיקת הדגימה בוחנת שורות. '
+                f'לבדיקה מהירה יותר שמכסה 100% מהתיקונים — עברו על '
+                f'<strong>ספר הכללים</strong> למעלה.</p></div>',
                 unsafe_allow_html=True)
 
             if not _sc_plan:
-                if st.button("▶ התחל בדיקת דגימה — ניקוי", type="primary",
+                if st.button(f"▶ התחל בדיקת דגימה — {_sc_total} שורות", type="primary",
                              use_container_width=True, key="sc_clean_start"):
                     plan = sc.build_sample_plan(df, sc.CLEAN_STRATA_COLS)
                     st.session_state[_sc_key] = {"plan": plan, "verdicts": {}, "card": None}
@@ -2164,9 +2451,13 @@ elif stage == "clean":
                             st.session_state[_sc_key]["verdicts"] = _sc_verdicts
                             st.rerun()
                     with b3:
-                        if st.button("⏭️ דלג (לא בטוח)", use_container_width=True,
-                                     key=f"sc_skip_{vkey}"):
-                            _sc_verdicts[vkey] = "correct"
+                        # "Not sure" is its own outcome. Recording it as
+                        # "correct" laundered rows a human could not judge into
+                        # the statistical claim.
+                        if st.button("⏭️ לא בטוח", use_container_width=True,
+                                     key=f"sc_skip_{vkey}",
+                                     help="השורה לא תיספר כתקינה. השכבה תסומן כלא הושלמה."):
+                            _sc_verdicts[vkey] = "unknown"
                             st.session_state[_sc_key]["verdicts"] = _sc_verdicts
                             st.rerun()
 
@@ -2176,20 +2467,33 @@ elif stage == "clean":
                     for si, stratum in enumerate(_sc_plan):
                         n_reviewed = 0
                         n_defects = 0
+                        n_unknown = 0
                         for ri in range(len(stratum["sample_indices"])):
                             v = _sc_verdicts.get(f"{si}:{ri}", "correct")
                             if v == "skipped":
+                                continue          # curtailed after a defect — legitimate
+                            if v == "unknown":
+                                n_unknown += 1    # judged by nobody; not a pass
                                 continue
                             n_reviewed += 1
                             if v == "wrong":
                                 n_defects += 1
+                        # The zero-acceptance plan only licenses "pass" when the
+                        # full sample was actually judged.
+                        if n_defects > 0:
+                            _verdict = "fail"
+                        elif n_unknown > 0:
+                            _verdict = "incomplete"
+                        else:
+                            _verdict = "pass"
                         strata_results.append({
                             "label": stratum["label"],
                             "lot_size": stratum["lot_size"],
                             "sample_n": stratum["sample_n"],
                             "reviewed": n_reviewed,
+                            "unknown": n_unknown,
                             "defects": n_defects,
-                            "verdict": "pass" if n_defects == 0 else "fail",
+                            "verdict": _verdict,
                             "sample_tickets": stratum["sample_tickets"],
                         })
                     card = sc.build_acceptance_card(
@@ -2205,20 +2509,18 @@ elif stage == "clean":
             else:
                 # ── Show completed card ─────────────────────────────────────
                 card = _sc_card
-                if card["passed"]:
-                    st.markdown(
-                        f'<div style="background:#d1fae5;border:2px solid #059669;'
-                        f'border-radius:10px;padding:1.2rem;text-align:center;'
-                        f'font-size:1.1rem;margin-bottom:1rem;">'
-                        f'✅ <strong>{card["claim"]}</strong></div>',
-                        unsafe_allow_html=True)
+                if card.get("incomplete"):
+                    _bg, _bd, _ic = "#fef3c7", "#d97706", "⚠️"
+                elif card["passed"]:
+                    _bg, _bd, _ic = "#d1fae5", "#059669", "✅"
                 else:
-                    st.markdown(
-                        f'<div style="background:#fee2e2;border:2px solid #dc2626;'
-                        f'border-radius:10px;padding:1.2rem;text-align:center;'
-                        f'font-size:1.1rem;margin-bottom:1rem;">'
-                        f'❌ <strong>{card["claim"]}</strong></div>',
-                        unsafe_allow_html=True)
+                    _bg, _bd, _ic = "#fee2e2", "#dc2626", "❌"
+                st.markdown(
+                    f'<div style="background:{_bg};border:2px solid {_bd};'
+                    f'border-radius:10px;padding:1.2rem;text-align:center;'
+                    f'font-size:1.1rem;margin-bottom:1rem;">'
+                    f'{_ic} <strong>{card["claim"]}</strong></div>',
+                    unsafe_allow_html=True)
 
                 _table(sc.card_to_dataframe(card))
 

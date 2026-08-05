@@ -29,7 +29,10 @@ LOG_DIR = os.path.join(tempfile.gettempdir(), "herzliya_audit")
 VALID_SOURCES = {"auto_fix", "manual_editor", "bulk_paste", "gis_retry", "waive",
                  "manual_review", "spot_check_approval", "user_qa",
                  "user_override", "user_resp_term", "user_resp_default",
-                 "context_resolve"}
+                 "context_resolve",
+                 # Rule-ledger verdicts: a human accepting, rejecting, or
+                 # rewriting one rule for every row that rule produced.
+                 "rule_review"}
 
 # Run currently being logged.  Set once per session via set_run(); callers that
 # do not set it get a stable "unscoped" bucket rather than silently mixing into

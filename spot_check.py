@@ -15,7 +15,13 @@ the address-parsing route and the geocode precision tier.
 
 Within each stratum we draw a zero-acceptance sample.  The user reviews
 each sampled row and says "correct" or "wrong".  At β=0.10, p_reject=0.05,
-that's 46 rows per stratum — curtailed at the first defect.
+that's 47 rows per stratum — curtailed at the first defect.  Note that the
+total workload is 47 × (number of strata), which on a real export is several
+hundred rows, not fifty; the UI must quote the figure from the actual plan.
+
+A row the reviewer marks "not sure" is recorded as `unknown`, never as a pass.
+Its stratum becomes `incomplete`, because a zero-acceptance plan only licenses
+an accept when the whole sample was actually judged.
 
 Acceptance card
 ---------------
@@ -196,14 +202,23 @@ def build_acceptance_card(stage: str, strata_results: list,
     total_lot = sum(s["lot_size"] for s in strata_results)
     total_reviewed = sum(s["reviewed"] for s in strata_results)
     total_defects = sum(s["defects"] for s in strata_results)
+    total_unknown = sum(s.get("unknown", 0) for s in strata_results)
     all_passed = all(s["verdict"] == "pass" for s in strata_results)
+    # A stratum whose sample was not fully judged has not satisfied its
+    # zero-acceptance plan, so it cannot contribute to a pass.
+    incomplete = [s for s in strata_results if s["verdict"] == "incomplete"]
 
-    max_error_pct = round((1 - beta) * 100)
-    if all_passed:
+    detect_pct = round((1 - beta) * 100)
+    if incomplete:
+        claim = (f"נבדקו {total_reviewed} שורות מתוך {total_lot:,}, "
+                 f"ו-{total_unknown} סומנו כ״לא בטוח״. "
+                 f"{len(incomplete)} שכבות לא הושלמו, ולכן לא ניתן לקבוע פסיקה. "
+                 f"השלימו את הבדיקה או בקשו דגימה חלופית.")
+    elif all_passed:
         claim = (f"נבדקו {total_reviewed} שורות מתוך {total_lot:,}. "
                  f"נמצאו 0 שגיאות. "
-                 f"שיעור השגיאה נמוך מ-{p_reject*100:.0f}% "
-                 f"ברמת ביטחון {max_error_pct}%.")
+                 f"אילו שיעור השגיאה האמיתי היה {p_reject*100:.0f}% או יותר, "
+                 f"היה סיכוי של {detect_pct}% שהבדיקה הייתה מגלה זאת.")
     else:
         claim = (f"נבדקו {total_reviewed} שורות מתוך {total_lot:,}. "
                  f"נמצאו {total_defects} שגיאות. "
@@ -215,10 +230,12 @@ def build_acceptance_card(stage: str, strata_results: list,
         "p_reject": p_reject,
         "beta": beta,
         "claim": claim,
-        "passed": all_passed,
+        "passed": all_passed and not incomplete,
+        "incomplete": bool(incomplete),
         "total_lot": total_lot,
         "total_reviewed": total_reviewed,
         "total_defects": total_defects,
+        "total_unknown": total_unknown,
         "strata": strata_results,
         "run_id": run_id,
     }
@@ -226,6 +243,7 @@ def build_acceptance_card(stage: str, strata_results: list,
 
 def card_to_dataframe(card: dict) -> pd.DataFrame:
     """Convert an acceptance card's strata into a summary DataFrame for export."""
+    _v = {"pass": "✅ עבר", "fail": "❌ נכשל", "incomplete": "⚠️ לא הושלם"}
     rows = []
     for s in card["strata"]:
         rows.append({
@@ -233,15 +251,18 @@ def card_to_dataframe(card: dict) -> pd.DataFrame:
             "גודל_מנה": s["lot_size"],
             "גודל_דגימה": s["sample_n"],
             "נבדקו": s["reviewed"],
+            "לא בטוח": s.get("unknown", 0),
             "שגיאות": s["defects"],
-            "פסיקה": "✅ עבר" if s["verdict"] == "pass" else "❌ נכשל",
+            "פסיקה": _v.get(s["verdict"], s["verdict"]),
         })
     rows.append({
         "שכבה": "סה״כ",
         "גודל_מנה": card["total_lot"],
         "גודל_דגימה": "",
         "נבדקו": card["total_reviewed"],
+        "לא בטוח": card.get("total_unknown", 0),
         "שגיאות": card["total_defects"],
-        "פסיקה": "✅ עבר" if card["passed"] else "❌ נכשל",
+        "פסיקה": ("⚠️ לא הושלם" if card.get("incomplete")
+                  else ("✅ עבר" if card["passed"] else "❌ נכשל")),
     })
     return pd.DataFrame(rows)
